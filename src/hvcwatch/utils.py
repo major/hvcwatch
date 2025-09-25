@@ -136,7 +136,7 @@ def _is_time_in_range(
 
 
 def is_market_hours_or_near(
-    check_time: datetime = datetime.now(), hours: int = 3
+    check_time: datetime = datetime.now(), hours: int = 1
 ) -> bool:
     """
     Returns True if the NYSE market is open or if the specified time
@@ -144,7 +144,7 @@ def is_market_hours_or_near(
 
     Args:
         check_time: Datetime to check. If None, uses current time (default: None)
-        hours: Number of hours before/after market open/close to consider "near" (default: 3)
+        hours: Number of hours before/after market open/close to consider "near" (default: 1)
 
     Returns:
         bool: True if market is open or within specified hours of open/close, False otherwise
