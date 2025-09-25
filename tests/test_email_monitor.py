@@ -30,13 +30,13 @@ def mock_mail_message():
 
 
 @pytest.mark.parametrize(
-    "responses,expected_print",
+    "responses,expected_process",
     [
         ([{"EXISTS": 1}], True),
         ([], False),
     ],
 )
-def test_monitor_mailbox_detects_new_email(responses, expected_print, mock_mailbox):
+def test_monitor_mailbox_detects_new_email(responses, expected_process, mock_mailbox):
     mock_msg = MagicMock()
     mock_msg.date = datetime(2024, 6, 1, 14, 30)
     mock_msg.subject = "Test"
@@ -54,17 +54,17 @@ def test_monitor_mailbox_detects_new_email(responses, expected_print, mock_mailb
 
     mock_mailbox.idle.poll.side_effect = limited_poll
 
-    with patch("builtins.print") as mock_print:
+    with patch("hvcwatch.email_monitor.process_email_message") as mock_process:
         with patch("hvcwatch.email_monitor.logger"):
             try:
                 monitor_mailbox(mock_mailbox)
             except KeyboardInterrupt:
                 pass
 
-        if expected_print:
-            mock_print.assert_called_with(mock_msg.date, mock_msg.subject)
+        if expected_process:
+            mock_process.assert_called_once_with(mock_msg)
         else:
-            mock_print.assert_not_called()
+            mock_process.assert_not_called()
 
 
 def test_connect_imap_calls_monitor_and_unread():

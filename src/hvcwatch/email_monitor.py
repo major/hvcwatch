@@ -58,7 +58,7 @@ def monitor_mailbox(mailbox: BaseMailBox) -> None:
         if responses:
             logger.info("New email detected while IDLE")
             for msg in mailbox.fetch(A(seen=False), mark_seen=True):
-                print(msg.date, msg.subject)
+                process_email_message(msg)
 
 
 def get_unread_messages(mailbox: BaseMailBox) -> None:
