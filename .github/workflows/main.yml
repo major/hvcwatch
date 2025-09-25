@@ -10,9 +10,6 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  POLYGON_API_KEY: "null"
-  FASTMAIL_USER: "null"
-  FASTMAIL_PASSWORD: "null"
 
 jobs:
   testing:
