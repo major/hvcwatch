@@ -85,7 +85,11 @@ def get_unread_messages(mailbox: BaseMailBox) -> None:
     logger.info(f"Processing {len(unread_messages)} unread messages")
 
     for msg in unread_messages:
-        logger.info("Found unread email", subject=msg.subject, date=msg.date)
+        logger.info(
+            "Found unread email",
+            subject=msg.subject,
+            date=msg.date.strftime("%Y-%m-%d %H:%M"),
+        )
         process_email_message(msg)
 
 
