@@ -14,8 +14,10 @@ logging.basicConfig(level=logging.INFO)
 logger = structlog.get_logger()
 
 
-def format_number(num: float | int) -> str:
+def format_number(num: float | int | None) -> str:
     """Format large numbers with K, M, B suffixes"""
+    if num is None:
+        return "N/A"
     if num >= 1_000_000_000:
         return f"{num / 1_000_000_000:.1f}B"
     elif num >= 1_000_000:

@@ -25,11 +25,19 @@ class DiscordNotifier:
     def build_description(self) -> str:
         volume = format_number(self.ticker_stats["volume"])
         volume_sma = format_number(self.ticker_stats["volume_sma"])
-        volume_ratio = self.ticker_stats["volume"] / self.ticker_stats["volume_sma"]
+
+        # Handle case where volume_sma might be None
+        if self.ticker_stats["volume_sma"] is not None:
+            volume_ratio = self.ticker_stats["volume"] / self.ticker_stats["volume_sma"]
+            volume_line = (
+                f"Volume vs avg: {volume} / {volume_sma} **{volume_ratio:.2f}x**"
+            )
+        else:
+            volume_line = f"Volume: {volume} (insufficient data for average)"
 
         desc = [
             "Current price: ${:.2f}".format(self.ticker_stats["close"]),
-            f"Volume vs avg: {volume} / {volume_sma} **{volume_ratio:.2f}x**",
+            volume_line,
         ]
         return "\n".join(desc)
 
