@@ -17,7 +17,9 @@ def test_main_calls_connect_imap_and_logs(
 
     hvcwatch.main.main()
 
-    mock_logger.info.assert_called_once_with("Starting HVC Watch email monitor")
+    mock_logger.info.assert_called_once_with(
+        "Starting HVC Watch email monitor", version="commit=unknown, branch=unknown"
+    )
     mock_connect_imap.assert_called_once_with(
         "imap.example.com",
         "user",
