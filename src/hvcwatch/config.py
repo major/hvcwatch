@@ -16,6 +16,13 @@ class Settings(BaseSettings):
 
     discord_webhook_url: str = Field(..., description="Discord webhook URL")
 
+    mastodon_server_url: str | None = Field(
+        None, description="Mastodon server URL (e.g., 'https://mastodon.social')"
+    )
+    mastodon_access_token: str | None = Field(
+        None, description="Mastodon user access token for posting statuses"
+    )
+
     polygon_api_key: str = Field(..., description="Polygon.io API key")
 
     log_level: str = Field("INFO", description="Log level")
