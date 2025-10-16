@@ -131,16 +131,14 @@ def test_process_email_message_behavior(subject, date, market_hours, expected_no
             "hvcwatch.email_monitor.is_market_hours_or_near", return_value=market_hours
         ),
         patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
-        patch("hvcwatch.email_monitor.DiscordNotifier") as mock_notifier_cls,
+        patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
     ):
-        mock_notifier = MagicMock()
-        mock_notifier_cls.return_value = mock_notifier
         process_email_message(msg)
         if subject is None:
             mock_logger.info.assert_any_call("Email has no subject")
-            mock_notifier.notify_discord.assert_not_called()
+            mock_notify.assert_not_called()
         elif not market_hours:
             mock_logger.info.assert_any_call("Email arrived outside market hours")
-            mock_notifier.notify_discord.assert_not_called()
+            mock_notify.assert_not_called()
         else:
-            mock_notifier.notify_discord.assert_called_once()
+            mock_notify.assert_called_once_with("AAPL")

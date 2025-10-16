@@ -5,7 +5,7 @@ from imap_tools.mailbox import BaseMailBox, MailBox
 from imap_tools.message import MailMessage
 from imap_tools.query import AND, A
 
-from hvcwatch.notification import DiscordNotifier
+from hvcwatch.notification import notify_all_platforms
 from hvcwatch.utils import extract_tickers, is_market_hours_or_near
 
 logging.basicConfig(level=logging.INFO)
@@ -95,7 +95,7 @@ def get_unread_messages(mailbox: BaseMailBox) -> None:
 
 def process_email_message(msg: MailMessage) -> None:
     """
-    Processes an email message by checking its subject and arrival time, extracting tickers, and notifying Discord.
+    Processes an email message by checking its subject and arrival time, extracting tickers, and sending notifications.
 
     Args:
         msg (MailMessage): The email message to process.
@@ -111,7 +111,7 @@ def process_email_message(msg: MailMessage) -> None:
         1. Checks if the email has a subject.
         2. Checks if the email arrived during or near market hours.
         3. Extracts ticker symbols from the subject.
-        4. Notifies Discord for each extracted ticker.
+        4. Sends notifications to all configured platforms for each extracted ticker.
     """
     if not msg.subject:
         logger.info("Email has no subject")
@@ -122,5 +122,4 @@ def process_email_message(msg: MailMessage) -> None:
         return
 
     for ticker in extract_tickers(msg.subject):
-        notifier = DiscordNotifier(ticker)
-        notifier.notify_discord()
+        notify_all_platforms(ticker)
