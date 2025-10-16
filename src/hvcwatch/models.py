@@ -1,6 +1,6 @@
 """Data models for hvcwatch."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TickerData(BaseModel):
@@ -10,6 +10,10 @@ class TickerData(BaseModel):
     This model combines ticker details from Polygon.io with current market stats,
     providing all the information needed to send notifications across platforms.
     """
+
+    model_config = ConfigDict(
+        populate_by_name=True  # Allow using both 'price' and 'close' as field names
+    )
 
     ticker: str = Field(..., description="Stock ticker symbol (e.g., 'AAPL')")
     name: str = Field(..., description="Company name (e.g., 'Apple Inc')")
@@ -27,6 +31,3 @@ class TickerData(BaseModel):
         None,
         description="Ratio of current volume to 20-day SMA (None if insufficient data)",
     )
-
-    class Config:
-        populate_by_name = True  # Allow using both 'price' and 'close' as field names

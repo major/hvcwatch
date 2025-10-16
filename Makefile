@@ -1,4 +1,4 @@
-.PHONY: test lint typecheck all
+.PHONY: test lint typecheck complexity all
 
 test:
 	uv run pytest
@@ -9,4 +9,7 @@ lint:
 typecheck:
 	uv run pyright src/*
 
-all: lint test typecheck
+complexity:
+	uv run radon cc src/ -s -n C --no-assert
+
+all: lint test typecheck complexity
