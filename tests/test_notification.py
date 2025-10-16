@@ -4,7 +4,11 @@ import pytest
 from unittest.mock import Mock, patch
 
 from hvcwatch.models import TickerData
-from hvcwatch.notification import DiscordNotifier, notify_all_platforms
+from hvcwatch.notification import (
+    DiscordNotifier,
+    MastodonNotifier,
+    notify_all_platforms,
+)
 
 
 @pytest.fixture
@@ -257,6 +261,247 @@ class TestDiscordNotifierSend:
         mock_logger.info.assert_any_call("Sending to Discord", ticker="NVDA")
 
 
+class TestMastodonNotifierBuildStatus:
+    """Test MastodonNotifier build_status method."""
+
+    @pytest.mark.parametrize(
+        "ticker_data_kwargs,expected_parts",
+        [
+            (
+                {
+                    "ticker": "AAPL",
+                    "name": "Apple Inc",
+                    "description": "Tech",
+                    "type": "CS",
+                    "logo_url": "https://example.com/logo.png",
+                    "close": 150.25,
+                    "volume": 2_500_000,
+                    "volume_sma": 2_000_000.0,
+                    "volume_ratio": 1.25,
+                },
+                [
+                    "🔔 Apple Inc ($AAPL)",
+                    "💰 Price: $150.25",
+                    "📊 Volume: 2M (avg: 2M, 1.25x)",
+                    "#stocks #AAPL #trading",
+                ],
+            ),
+            (
+                {
+                    "ticker": "TSLA",
+                    "name": "Tesla Inc",
+                    "description": "EV",
+                    "type": "CS",
+                    "logo_url": "https://example.com/logo.png",
+                    "close": 250.50,
+                    "volume": 500_000,
+                    "volume_sma": None,
+                    "volume_ratio": None,
+                },
+                [
+                    "🔔 Tesla Inc ($TSLA)",
+                    "💰 Price: $250.50",
+                    "📊 Volume: 500K",
+                    "#stocks #TSLA #trading",
+                ],
+            ),
+        ],
+    )
+    def test_build_status_various_values(self, ticker_data_kwargs, expected_parts):
+        """✅ Test build_status with various ticker data values."""
+        ticker_data = TickerData(**ticker_data_kwargs)
+        notifier = MastodonNotifier(
+            server_url="https://mastodon.social", access_token="test_token"
+        )
+
+        result = notifier.build_status(ticker_data)
+
+        # Check that all expected parts are in the result
+        for part in expected_parts:
+            assert part in result, f"Expected '{part}' in status"
+
+        # Verify status is within reasonable length
+        assert len(result) < 450, "Status should be under 450 characters"
+
+    def test_build_status_with_insufficient_data(
+        self, sample_ticker_data_no_sma: TickerData
+    ):
+        """✅ Test build_status when volume_sma is None (insufficient data)."""
+        notifier = MastodonNotifier(
+            server_url="https://mastodon.social", access_token="test_token"
+        )
+
+        result = notifier.build_status(sample_ticker_data_no_sma)
+
+        assert "💰 Price: $250.50" in result
+        assert "📊 Volume: 500K" in result
+        assert "#stocks #TSLA #trading" in result
+        assert "avg:" not in result  # No average when insufficient data
+
+    @patch("hvcwatch.notification.logger")
+    def test_build_status_character_limit(self, mock_logger):
+        """✅ Test that extremely long company names are handled gracefully."""
+        # Create ticker with very long name that will exceed 450 chars
+        ticker_data = TickerData(
+            ticker="VERYLONGTICKERSYMBOL",
+            name="A" * 500,  # Very long name - will exceed 450 char limit
+            description="Test",
+            type="CS",
+            logo_url="https://example.com/logo.png",
+            close=100.0,
+            volume=1_000_000,
+            volume_sma=900_000.0,
+            volume_ratio=1.11,
+        )
+
+        notifier = MastodonNotifier(
+            server_url="https://mastodon.social", access_token="test_token"
+        )
+
+        result = notifier.build_status(ticker_data)
+
+        # Should truncate to exactly 453 chars (450 + "...")
+        assert len(result) == 453
+        assert result.endswith("...")
+
+        # Verify warning was logged
+        mock_logger.warning.assert_called_once()
+        warning_call = mock_logger.warning.call_args
+        assert warning_call[0][0] == "Status exceeds recommended length, truncating"
+        assert warning_call[1]["ticker"] == "VERYLONGTICKERSYMBOL"
+
+
+class TestMastodonNotifierSend:
+    """Test MastodonNotifier send method."""
+
+    @pytest.fixture
+    def mock_mastodon_client(self):
+        """Mock Mastodon API client."""
+        with patch("hvcwatch.notification.Mastodon") as mock_mastodon_class:
+            mock_client = Mock()
+            mock_mastodon_class.return_value = mock_client
+
+            # Mock successful status post
+            mock_client.status_post.return_value = {
+                "id": "123456789",
+                "url": "https://mastodon.social/@user/123456789",
+            }
+
+            yield mock_mastodon_class, mock_client
+
+    @patch("hvcwatch.notification.logger")
+    def test_send_success(
+        self, mock_logger, sample_ticker_data: TickerData, mock_mastodon_client
+    ):
+        """✅ Test successful Mastodon status post."""
+        mock_mastodon_class, mock_client = mock_mastodon_client
+
+        notifier = MastodonNotifier(
+            server_url="https://mastodon.social", access_token="test_token"
+        )
+        notifier.send(sample_ticker_data)
+
+        # Verify Mastodon client was created correctly
+        mock_mastodon_class.assert_called_once_with(
+            access_token="test_token",
+            api_base_url="https://mastodon.social",
+        )
+
+        # Verify status_post was called
+        mock_client.status_post.assert_called_once()
+        call_args = mock_client.status_post.call_args[1]
+        assert "AAPL" in call_args["status"]
+        assert "Apple Inc" in call_args["status"]
+        assert call_args["visibility"] == "public"
+
+        # Verify logging
+        mock_logger.info.assert_any_call("Sending to Mastodon", ticker="AAPL")
+        mock_logger.info.assert_any_call(
+            "Mastodon status posted",
+            ticker="AAPL",
+            status_id="123456789",
+            url="https://mastodon.social/@user/123456789",
+        )
+
+    @patch("hvcwatch.notification.logger")
+    def test_send_with_different_ticker_data(self, mock_logger, mock_mastodon_client):
+        """✅ Test Mastodon notification with different ticker data."""
+        mock_mastodon_class, mock_client = mock_mastodon_client
+
+        ticker_data = TickerData(
+            ticker="NVDA",
+            name="NVIDIA Corporation",
+            description="Graphics processors",
+            type="CS",
+            logo_url="https://example.com/nvda.png",
+            close=495.50,
+            volume=5_000_000,
+            volume_sma=4_000_000.0,
+            volume_ratio=1.25,
+        )
+
+        notifier = MastodonNotifier(
+            server_url="https://mastodon.social", access_token="test_token"
+        )
+        notifier.send(ticker_data)
+
+        # Verify status contains ticker data
+        call_args = mock_client.status_post.call_args[1]
+        status = call_args["status"]
+        assert "NVDA" in status
+        assert "NVIDIA Corporation" in status
+        assert "$495.50" in status
+
+        # Verify logging with correct ticker
+        mock_logger.info.assert_any_call("Sending to Mastodon", ticker="NVDA")
+
+    @patch("hvcwatch.notification.logger")
+    def test_send_api_failure(self, mock_logger, sample_ticker_data):
+        """❌ Test error handling when Mastodon API fails."""
+        with patch("hvcwatch.notification.Mastodon") as mock_mastodon_class:
+            mock_client = Mock()
+            mock_client.status_post.side_effect = Exception("API error")
+            mock_mastodon_class.return_value = mock_client
+
+            notifier = MastodonNotifier(
+                server_url="https://mastodon.social", access_token="test_token"
+            )
+
+            # Should raise the exception after logging
+            with pytest.raises(Exception, match="API error"):
+                notifier.send(sample_ticker_data)
+
+            # Verify error was logged
+            mock_logger.error.assert_called_once()
+            error_call = mock_logger.error.call_args
+            assert error_call[1]["ticker"] == "AAPL"
+            assert "API error" in error_call[1]["error"]
+
+    @pytest.mark.parametrize(
+        "server_url,access_token",
+        [
+            ("https://mastodon.social", "token123"),
+            ("https://fosstodon.org", "different_token"),
+            ("https://mas.to", "another_token"),
+        ],
+    )
+    def test_init_with_different_servers(self, server_url, access_token):
+        """✅ Test MastodonNotifier initialization with different servers."""
+        with patch("hvcwatch.notification.Mastodon") as mock_mastodon_class:
+            notifier = MastodonNotifier(
+                server_url=server_url, access_token=access_token
+            )
+
+            assert notifier.server_url == server_url
+            assert notifier.access_token == access_token
+
+            # Verify Mastodon client was created with correct parameters
+            mock_mastodon_class.assert_called_once_with(
+                access_token=access_token,
+                api_base_url=server_url,
+            )
+
+
 class TestNotifyAllPlatforms:
     """Test notify_all_platforms orchestrator function."""
 
@@ -404,3 +649,29 @@ class TestNotifyAllPlatforms:
             mock_logger.info.assert_any_call(
                 "Fetching ticker data for notifications", ticker=ticker
             )
+
+    @patch("hvcwatch.notification.settings")
+    @patch("hvcwatch.notification.logger")
+    @patch("hvcwatch.notification.DiscordNotifier")
+    def test_notify_all_platforms_no_discord_config(
+        self, mock_notifier_class, mock_logger, mock_settings, mock_ticker_functions
+    ):
+        """⚠️ Test graceful handling when Discord is not configured."""
+        mock_get_details, mock_get_stats = mock_ticker_functions
+        mock_settings.discord_webhook_url = None  # No Discord configured
+
+        notify_all_platforms("AAPL")
+
+        # Verify Discord notifier was NOT created
+        mock_notifier_class.assert_not_called()
+
+        # Verify debug log for skipping Discord
+        mock_logger.debug.assert_any_call(
+            "Discord webhook not configured, skipping", ticker="AAPL"
+        )
+
+        # Verify warning about no platforms configured
+        mock_logger.warning.assert_called_once_with(
+            "No notifications sent - no platforms configured",
+            ticker="AAPL",
+        )

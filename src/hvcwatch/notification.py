@@ -3,6 +3,7 @@ from typing import Protocol
 
 import structlog
 from discord_webhook import DiscordEmbed, DiscordWebhook
+from mastodon import Mastodon
 
 from hvcwatch.config import settings
 from hvcwatch.models import TickerData
@@ -101,6 +102,121 @@ class DiscordNotifier:
         logger.info("Discord response", status_code=response.status_code)
 
 
+class MastodonNotifier:
+    """
+    🐘 Mastodon notification provider.
+
+    Implements the NotificationProvider protocol to send ticker alerts
+    to Mastodon as text statuses with hashtags and market data.
+    """
+
+    def __init__(self, server_url: str, access_token: str) -> None:
+        """
+        Initialize Mastodon notifier with server credentials.
+
+        Args:
+            server_url: Mastodon instance URL (e.g., "https://mastodon.social")
+            access_token: User access token for posting statuses
+        """
+        self.server_url = server_url
+        self.access_token = access_token
+        self.mastodon = Mastodon(
+            access_token=access_token,
+            api_base_url=server_url,
+        )
+
+    def build_status(self, ticker_data: TickerData) -> str:
+        """
+        🎨 Build formatted status text for Mastodon.
+
+        Creates a concise status with company info, price, volume metrics,
+        and relevant hashtags. Handles character limits gracefully.
+
+        Args:
+            ticker_data: Enriched ticker data
+
+        Returns:
+            Formatted status text (max ~450 chars to be safe)
+        """
+        volume = format_number(ticker_data.volume)
+        volume_sma = format_number(ticker_data.volume_sma)
+
+        # Build volume line
+        if ticker_data.volume_sma is not None:
+            volume_ratio = ticker_data.volume / ticker_data.volume_sma
+            volume_line = (
+                f"📊 Volume: {volume} (avg: {volume_sma}, {volume_ratio:.2f}x)"
+            )
+        else:
+            volume_line = f"📊 Volume: {volume}"
+
+        # Build the status components
+        title = f"🔔 {ticker_data.name} (${ticker_data.ticker})"
+        price_line = f"💰 Price: ${ticker_data.price:.2f}"
+
+        # Build hashtags - keep them concise
+        hashtags = f"#stocks #{ticker_data.ticker} #trading"
+
+        # Combine all parts
+        status_parts = [
+            title,
+            price_line,
+            volume_line,
+            "",  # Empty line before hashtags
+            hashtags,
+        ]
+
+        status = "\n".join(status_parts)
+
+        # Mastodon default limit is 500 chars, be conservative
+        if len(status) > 450:
+            # Truncate description if needed
+            logger.warning(
+                "Status exceeds recommended length, truncating",
+                ticker=ticker_data.ticker,
+                length=len(status),
+            )
+            status = status[:450] + "..."
+
+        return status
+
+    def send(self, ticker_data: TickerData) -> None:
+        """
+        📤 Send notification to Mastodon as a status.
+
+        Args:
+            ticker_data: Enriched ticker data to send
+
+        Raises:
+            Exception: Logs errors from Mastodon API but doesn't raise
+        """
+        logger.info("Sending to Mastodon", ticker=ticker_data.ticker)
+
+        try:
+            status_text = self.build_status(ticker_data)
+
+            # Post the status (toot)
+            response = self.mastodon.status_post(
+                status=status_text,
+                visibility="public",  # Make it public by default
+            )
+
+            logger.info(
+                "Mastodon status posted",
+                ticker=ticker_data.ticker,
+                status_id=response.get("id"),
+                url=response.get("url"),
+            )
+
+        except Exception as e:
+            logger.error(
+                "Failed to post Mastodon status",
+                ticker=ticker_data.ticker,
+                error=str(e),
+            )
+            raise
+
+
 def notify_all_platforms(ticker: str) -> None:
     """
     🎼 Orchestrate notifications across all enabled platforms.
@@ -108,6 +224,10 @@ def notify_all_platforms(ticker: str) -> None:
     This function fetches ticker data once and sends it to all configured
     notification providers. Currently supports Discord, with more platforms
     coming in future phases (Mastodon, Slack, etc.).
+
+    Platforms are only used if their credentials are configured. Missing
+    credentials for a platform results in that platform being skipped
+    gracefully without affecting other platforms.
 
     Args:
         ticker: Stock ticker symbol (e.g., "AAPL")
@@ -141,16 +261,43 @@ def notify_all_platforms(ticker: str) -> None:
         logger.error("Failed to fetch ticker data", ticker=ticker, error=str(e))
         return
 
-    # Send to Discord (only platform currently supported)
-    # TODO: Add more platforms in future phases based on configuration
-    try:
-        discord_notifier = DiscordNotifier()
-        discord_notifier.send(ticker_data)
-        logger.info("Notification sent successfully", ticker=ticker, platform="Discord")
-    except Exception as e:
-        logger.error(
-            "Failed to send notification",
+    # Track if at least one notification was sent
+    notifications_sent = 0
+
+    # Send to Discord if configured
+    if settings.discord_webhook_url:
+        try:
+            discord_notifier = DiscordNotifier()
+            discord_notifier.send(ticker_data)
+            logger.info(
+                "Notification sent successfully", ticker=ticker, platform="Discord"
+            )
+            notifications_sent += 1
+        except Exception as e:
+            logger.error(
+                "Failed to send notification",
+                ticker=ticker,
+                platform="Discord",
+                error=str(e),
+            )
+    else:
+        logger.debug("Discord webhook not configured, skipping", ticker=ticker)
+
+    # TODO: Add Mastodon notifier here in Phase 2
+    # if settings.mastodon_server_url and settings.mastodon_access_token:
+    #     try:
+    #         mastodon_notifier = MastodonNotifier()
+    #         mastodon_notifier.send(ticker_data)
+    #         logger.info("Notification sent successfully", ticker=ticker, platform="Mastodon")
+    #         notifications_sent += 1
+    #     except Exception as e:
+    #         logger.error("Failed to send notification", ticker=ticker, platform="Mastodon", error=str(e))
+    # else:
+    #     logger.debug("Mastodon credentials not configured, skipping", ticker=ticker)
+
+    # Warn if no notifications were sent at all
+    if notifications_sent == 0:
+        logger.warning(
+            "No notifications sent - no platforms configured",
             ticker=ticker,
-            platform="Discord",
-            error=str(e),
         )
