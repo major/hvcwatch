@@ -17,7 +17,9 @@ class TickerData(BaseModel):
 
     ticker: str = Field(..., description="Stock ticker symbol (e.g., 'AAPL')")
     name: str = Field(..., description="Company name (e.g., 'Apple Inc')")
-    description: str = Field(..., description="Company description")
+    description: str | None = Field(
+        None, description="Company description (None if not available from API)"
+    )
     type: str = Field(..., description="Security type (e.g., 'CS' for Common Stock)")
     logo_url: str = Field(..., description="URL to company logo image")
 

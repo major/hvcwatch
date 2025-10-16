@@ -72,7 +72,7 @@ class TestTickerData:
 
     @pytest.mark.parametrize(
         "missing_field",
-        ["ticker", "name", "description", "type", "logo_url", "close", "volume"],
+        ["ticker", "name", "type", "logo_url", "close", "volume"],
     )
     def test_ticker_data_missing_required_fields(self, missing_field: str) -> None:
         """❌ Test that ValidationError is raised when required fields are missing."""
@@ -154,3 +154,22 @@ class TestTickerData:
         assert ticker_data.name == "NVIDIA Corporation"
         assert ticker_data.price == 495.50
         assert ticker_data.volume == 5_000_000
+
+    def test_ticker_data_with_none_description(self) -> None:
+        """✅ Test TickerData with None description (Polygon.io doesn't always provide this)."""
+        ticker_data = TickerData(
+            ticker="IPAC",
+            name="Income Opportunity REIT Corp",
+            description=None,  # Some tickers don't have a description in Polygon.io
+            type="CS",
+            logo_url="https://example.com/ipac.png",
+            close=10.50,
+            volume=100_000,
+            volume_sma=80_000.0,
+            volume_ratio=1.25,
+        )
+
+        assert ticker_data.ticker == "IPAC"
+        assert ticker_data.name == "Income Opportunity REIT Corp"
+        assert ticker_data.description is None
+        assert ticker_data.price == 10.50
