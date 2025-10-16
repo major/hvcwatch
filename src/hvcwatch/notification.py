@@ -283,17 +283,27 @@ def notify_all_platforms(ticker: str) -> None:
     else:
         logger.debug("Discord webhook not configured, skipping", ticker=ticker)
 
-    # TODO: Add Mastodon notifier here in Phase 2
-    # if settings.mastodon_server_url and settings.mastodon_access_token:
-    #     try:
-    #         mastodon_notifier = MastodonNotifier()
-    #         mastodon_notifier.send(ticker_data)
-    #         logger.info("Notification sent successfully", ticker=ticker, platform="Mastodon")
-    #         notifications_sent += 1
-    #     except Exception as e:
-    #         logger.error("Failed to send notification", ticker=ticker, platform="Mastodon", error=str(e))
-    # else:
-    #     logger.debug("Mastodon credentials not configured, skipping", ticker=ticker)
+    # Send to Mastodon if configured
+    if settings.mastodon_server_url and settings.mastodon_access_token:
+        try:
+            mastodon_notifier = MastodonNotifier(
+                server_url=settings.mastodon_server_url,
+                access_token=settings.mastodon_access_token,
+            )
+            mastodon_notifier.send(ticker_data)
+            logger.info(
+                "Notification sent successfully", ticker=ticker, platform="Mastodon"
+            )
+            notifications_sent += 1
+        except Exception as e:
+            logger.error(
+                "Failed to send notification",
+                ticker=ticker,
+                platform="Mastodon",
+                error=str(e),
+            )
+    else:
+        logger.debug("Mastodon credentials not configured, skipping", ticker=ticker)
 
     # Warn if no notifications were sent at all
     if notifications_sent == 0:

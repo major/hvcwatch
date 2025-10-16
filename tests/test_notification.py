@@ -675,3 +675,243 @@ class TestNotifyAllPlatforms:
             "No notifications sent - no platforms configured",
             ticker="AAPL",
         )
+
+    @patch("hvcwatch.notification.settings")
+    @patch("hvcwatch.notification.logger")
+    @patch("hvcwatch.notification.DiscordNotifier")
+    @patch("hvcwatch.notification.MastodonNotifier")
+    def test_notify_all_platforms_both_enabled(
+        self,
+        mock_mastodon_class,
+        mock_discord_class,
+        mock_logger,
+        mock_settings,
+        mock_ticker_functions,
+    ):
+        """✅ Test notification sent to both Discord and Mastodon."""
+        mock_get_details, mock_get_stats = mock_ticker_functions
+
+        # Configure both platforms
+        mock_settings.discord_webhook_url = "https://discord.com/api/webhooks/test"
+        mock_settings.mastodon_server_url = "https://mastodon.social"
+        mock_settings.mastodon_access_token = "test_token"
+
+        mock_discord = Mock()
+        mock_mastodon = Mock()
+        mock_discord_class.return_value = mock_discord
+        mock_mastodon_class.return_value = mock_mastodon
+
+        notify_all_platforms("AAPL")
+
+        # Verify both notifiers were created
+        mock_discord_class.assert_called_once()
+        mock_mastodon_class.assert_called_once_with(
+            server_url="https://mastodon.social",
+            access_token="test_token",
+        )
+
+        # Verify both notifiers sent messages
+        mock_discord.send.assert_called_once()
+        mock_mastodon.send.assert_called_once()
+
+        # Verify logging for both platforms
+        mock_logger.info.assert_any_call(
+            "Notification sent successfully", ticker="AAPL", platform="Discord"
+        )
+        mock_logger.info.assert_any_call(
+            "Notification sent successfully", ticker="AAPL", platform="Mastodon"
+        )
+
+        # Verify no warning about missing platforms
+        mock_logger.warning.assert_not_called()
+
+    @patch("hvcwatch.notification.settings")
+    @patch("hvcwatch.notification.logger")
+    @patch("hvcwatch.notification.DiscordNotifier")
+    @patch("hvcwatch.notification.MastodonNotifier")
+    def test_notify_all_platforms_mastodon_only(
+        self,
+        mock_mastodon_class,
+        mock_discord_class,
+        mock_logger,
+        mock_settings,
+        mock_ticker_functions,
+    ):
+        """✅ Test notification sent to Mastodon only (no Discord)."""
+        mock_get_details, mock_get_stats = mock_ticker_functions
+
+        # Configure only Mastodon
+        mock_settings.discord_webhook_url = None
+        mock_settings.mastodon_server_url = "https://mastodon.social"
+        mock_settings.mastodon_access_token = "test_token"
+
+        mock_mastodon = Mock()
+        mock_mastodon_class.return_value = mock_mastodon
+
+        notify_all_platforms("AAPL")
+
+        # Verify Discord notifier was NOT created
+        mock_discord_class.assert_not_called()
+
+        # Verify Mastodon notifier was created and sent message
+        mock_mastodon_class.assert_called_once_with(
+            server_url="https://mastodon.social",
+            access_token="test_token",
+        )
+        mock_mastodon.send.assert_called_once()
+
+        # Verify logging
+        mock_logger.debug.assert_any_call(
+            "Discord webhook not configured, skipping", ticker="AAPL"
+        )
+        mock_logger.info.assert_any_call(
+            "Notification sent successfully", ticker="AAPL", platform="Mastodon"
+        )
+
+        # Verify no warning about missing platforms (Mastodon is configured)
+        mock_logger.warning.assert_not_called()
+
+    @patch("hvcwatch.notification.settings")
+    @patch("hvcwatch.notification.logger")
+    @patch("hvcwatch.notification.DiscordNotifier")
+    @patch("hvcwatch.notification.MastodonNotifier")
+    def test_notify_all_platforms_discord_fails_mastodon_succeeds(
+        self,
+        mock_mastodon_class,
+        mock_discord_class,
+        mock_logger,
+        mock_settings,
+        mock_ticker_functions,
+    ):
+        """⚠️ Test partial failure: Discord fails but Mastodon succeeds."""
+        mock_get_details, mock_get_stats = mock_ticker_functions
+
+        # Configure both platforms
+        mock_settings.discord_webhook_url = "https://discord.com/api/webhooks/test"
+        mock_settings.mastodon_server_url = "https://mastodon.social"
+        mock_settings.mastodon_access_token = "test_token"
+
+        # Discord fails, Mastodon succeeds
+        mock_discord = Mock()
+        mock_discord.send.side_effect = Exception("Discord webhook error")
+        mock_discord_class.return_value = mock_discord
+
+        mock_mastodon = Mock()
+        mock_mastodon_class.return_value = mock_mastodon
+
+        notify_all_platforms("AAPL")
+
+        # Verify both were attempted
+        mock_discord.send.assert_called_once()
+        mock_mastodon.send.assert_called_once()
+
+        # Verify error logged for Discord
+        error_calls = [
+            call
+            for call in mock_logger.error.call_args_list
+            if call[1].get("platform") == "Discord"
+        ]
+        assert len(error_calls) == 1
+        assert "Discord webhook error" in error_calls[0][1]["error"]
+
+        # Verify success logged for Mastodon
+        mock_logger.info.assert_any_call(
+            "Notification sent successfully", ticker="AAPL", platform="Mastodon"
+        )
+
+        # Verify no warning (one platform succeeded)
+        mock_logger.warning.assert_not_called()
+
+    @patch("hvcwatch.notification.settings")
+    @patch("hvcwatch.notification.logger")
+    @patch("hvcwatch.notification.DiscordNotifier")
+    @patch("hvcwatch.notification.MastodonNotifier")
+    def test_notify_all_platforms_mastodon_fails_discord_succeeds(
+        self,
+        mock_mastodon_class,
+        mock_discord_class,
+        mock_logger,
+        mock_settings,
+        mock_ticker_functions,
+    ):
+        """⚠️ Test partial failure: Mastodon fails but Discord succeeds."""
+        mock_get_details, mock_get_stats = mock_ticker_functions
+
+        # Configure both platforms
+        mock_settings.discord_webhook_url = "https://discord.com/api/webhooks/test"
+        mock_settings.mastodon_server_url = "https://mastodon.social"
+        mock_settings.mastodon_access_token = "test_token"
+
+        # Mastodon fails, Discord succeeds
+        mock_discord = Mock()
+        mock_discord_class.return_value = mock_discord
+
+        mock_mastodon = Mock()
+        mock_mastodon.send.side_effect = Exception("Mastodon API error")
+        mock_mastodon_class.return_value = mock_mastodon
+
+        notify_all_platforms("AAPL")
+
+        # Verify both were attempted
+        mock_discord.send.assert_called_once()
+        mock_mastodon.send.assert_called_once()
+
+        # Verify success logged for Discord
+        mock_logger.info.assert_any_call(
+            "Notification sent successfully", ticker="AAPL", platform="Discord"
+        )
+
+        # Verify error logged for Mastodon
+        error_calls = [
+            call
+            for call in mock_logger.error.call_args_list
+            if call[1].get("platform") == "Mastodon"
+        ]
+        assert len(error_calls) == 1
+        assert "Mastodon API error" in error_calls[0][1]["error"]
+
+        # Verify no warning (one platform succeeded)
+        mock_logger.warning.assert_not_called()
+
+    @patch("hvcwatch.notification.settings")
+    @patch("hvcwatch.notification.logger")
+    @patch("hvcwatch.notification.DiscordNotifier")
+    @patch("hvcwatch.notification.MastodonNotifier")
+    def test_notify_all_platforms_partial_mastodon_config(
+        self,
+        mock_mastodon_class,
+        mock_discord_class,
+        mock_logger,
+        mock_settings,
+        mock_ticker_functions,
+    ):
+        """⚠️ Test partial Mastodon config (only server URL, no token)."""
+        mock_get_details, mock_get_stats = mock_ticker_functions
+
+        # Configure Discord and partial Mastodon
+        mock_settings.discord_webhook_url = "https://discord.com/api/webhooks/test"
+        mock_settings.mastodon_server_url = "https://mastodon.social"
+        mock_settings.mastodon_access_token = None  # Missing token
+
+        mock_discord = Mock()
+        mock_discord_class.return_value = mock_discord
+
+        notify_all_platforms("AAPL")
+
+        # Verify Discord notifier was created and sent
+        mock_discord_class.assert_called_once()
+        mock_discord.send.assert_called_once()
+
+        # Verify Mastodon notifier was NOT created (partial config)
+        mock_mastodon_class.assert_not_called()
+
+        # Verify logging
+        mock_logger.info.assert_any_call(
+            "Notification sent successfully", ticker="AAPL", platform="Discord"
+        )
+        mock_logger.debug.assert_any_call(
+            "Mastodon credentials not configured, skipping", ticker="AAPL"
+        )
+
+        # No warning (Discord succeeded)
+        mock_logger.warning.assert_not_called()
