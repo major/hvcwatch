@@ -26,10 +26,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Key Components
 
 - **[config.py](src/hvcwatch/config.py)**: Pydantic Settings for environment variables (`.env` file)
-  - Required: `FASTMAIL_USER`, `FASTMAIL_PASS`, `DISCORD_WEBHOOK_URL`, `POLYGON_API_KEY`
+  - Required: `FASTMAIL_USER`, `FASTMAIL_PASS`, `POLYGON_API_KEY`
+  - Required (Discord): Either `DISCORD_WEBHOOK_URL` (single, deprecated) or `DISCORD_WEBHOOK_URLS` (comma-separated, recommended)
   - Optional: `MASTODON_SERVER_URL`, `MASTODON_ACCESS_TOKEN` (both required to enable Mastodon)
   - Optional: `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_TRACES_SAMPLE_RATE` (for error tracking)
   - IMAP settings default to Fastmail with folder `Trading/ToS Alerts`
+  - **Multiple Discord Webhooks**: Supports sending to multiple Discord channels via comma-separated URLs
+    - Use `DISCORD_WEBHOOK_URLS="url1,url2,url3"` for multiple webhooks
+    - Backward compatible: Old `DISCORD_WEBHOOK_URL` still works for single webhook
+    - URLs are automatically deduplicated and whitespace-trimmed
 
 - **[models.py](src/hvcwatch/models.py)**: Data models for type-safe ticker data
   - `TickerData`: Pydantic model containing ticker symbol, name, price, volume, logos, etc.
@@ -50,9 +55,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **[notification.py](src/hvcwatch/notification.py)**: Multi-platform notification system
   - **`NotificationProvider` Protocol**: Defines interface for all notifiers (duck typing)
   - **`DiscordNotifier`**: Discord webhook integration
+    - Accepts webhook URL in constructor for flexible multi-webhook support
     - Creates rich embeds with ticker details, logos, and company info
     - Formats volume data with human-readable suffixes (K/M/B)
     - Compares current volume to 20-day SMA
+    - **Multiple webhooks supported**: One notifier instance per webhook URL
   - **`MastodonNotifier`**: Mastodon API integration
     - Posts text statuses with emojis (🔔 💰 📊) and hashtags
     - Handles character limits (450 chars with truncation)
@@ -60,8 +67,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - **`notify_all_platforms()`**: Orchestrator function
     - Fetches ticker data once from Polygon.io
     - Sends to all enabled platforms (checks credentials)
-    - Graceful error handling (one platform can fail without affecting others)
-    - Logs success/failure per platform separately
+    - **Creates multiple `DiscordNotifier` instances** (one per webhook URL)
+    - Iterates through all Discord webhooks, sending to each independently
+    - Graceful error handling (one webhook/platform can fail without affecting others)
+    - Logs success/failure per webhook/platform separately with truncated URLs
 
 - **[main.py](src/hvcwatch/main.py)**: Application entry point
   - Initializes Sentry error tracking if `SENTRY_DSN` is provided
@@ -177,7 +186,11 @@ Any class implementing a `send()` method that accepts `TickerData` can be used a
 
 ### Platform Configuration
 
-- **Discord**: Required (`DISCORD_WEBHOOK_URL` must be set)
+- **Discord**: Required (at least one webhook URL must be configured)
+  - **Recommended**: Use `DISCORD_WEBHOOK_URLS` for comma-separated webhook URLs
+  - **Legacy**: Use `DISCORD_WEBHOOK_URL` for a single webhook (deprecated but still supported)
+  - Both can be used together; they will be combined and deduplicated
+  - Example: `DISCORD_WEBHOOK_URLS="https://discord.com/api/webhooks/123/abc,https://discord.com/api/webhooks/456/def"`
 - **Mastodon**: Optional (both `MASTODON_SERVER_URL` and `MASTODON_ACCESS_TOKEN` must be set)
 - If no platforms configured, logs warning but doesn't crash
 

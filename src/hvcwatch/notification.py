@@ -48,6 +48,15 @@ class DiscordNotifier:
     to Discord using rich embeds with company logos and formatted data.
     """
 
+    def __init__(self, webhook_url: str) -> None:
+        """
+        Initialize Discord notifier with webhook URL.
+
+        Args:
+            webhook_url: Discord webhook URL for sending notifications
+        """
+        self.webhook_url = webhook_url
+
     def build_description(self, ticker_data: TickerData) -> str:
         """
         🎨 Build formatted description for Discord embed.
@@ -95,7 +104,7 @@ class DiscordNotifier:
         )
 
         webhook = DiscordWebhook(
-            url=settings.discord_webhook_url,
+            url=self.webhook_url,
             rate_limit_retry=True,
         )
 
@@ -301,22 +310,28 @@ def notify_all_platforms(ticker: str) -> None:
     # Track if at least one notification was sent
     notifications_sent = 0
 
-    # Send to Discord if configured
-    if settings.discord_webhook_url:
-        try:
-            discord_notifier = DiscordNotifier()
-            discord_notifier.send(ticker_data)
-            logger.info(
-                "Notification sent successfully", ticker=ticker, platform="Discord"
-            )
-            notifications_sent += 1
-        except Exception as e:
-            logger.error(
-                "Failed to send notification",
-                ticker=ticker,
-                platform="Discord",
-                error=str(e),
-            )
+    # Send to Discord webhook(s) if configured
+    discord_webhook_urls = settings.get_discord_webhook_urls()
+    if discord_webhook_urls:
+        for webhook_url in discord_webhook_urls:
+            try:
+                discord_notifier = DiscordNotifier(webhook_url=webhook_url)
+                discord_notifier.send(ticker_data)
+                logger.info(
+                    "Notification sent successfully",
+                    ticker=ticker,
+                    platform="Discord",
+                    webhook_url=webhook_url[:50] + "...",  # Truncate for logging
+                )
+                notifications_sent += 1
+            except Exception as e:
+                logger.error(
+                    "Failed to send notification",
+                    ticker=ticker,
+                    platform="Discord",
+                    webhook_url=webhook_url[:50] + "...",  # Truncate for logging
+                    error=str(e),
+                )
     else:
         logger.debug("Discord webhook not configured, skipping", ticker=ticker)
 

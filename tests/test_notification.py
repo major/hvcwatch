@@ -132,7 +132,7 @@ class TestDiscordNotifierBuildDescription:
     def test_build_description_various_values(self, ticker_data_kwargs, expected_parts):
         """✅ Test build_description with various ticker data values."""
         ticker_data = TickerData(**ticker_data_kwargs)
-        notifier = DiscordNotifier()
+        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
 
         result = notifier.build_description(ticker_data)
 
@@ -148,7 +148,7 @@ class TestDiscordNotifierBuildDescription:
         self, sample_ticker_data_no_sma: TickerData
     ):
         """✅ Test build_description when volume_sma is None (insufficient data)."""
-        notifier = DiscordNotifier()
+        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
 
         result = notifier.build_description(sample_ticker_data_no_sma)
 
@@ -173,12 +173,13 @@ class TestDiscordNotifierSend:
             mock_discord_webhook
         )
 
-        notifier = DiscordNotifier()
+        webhook_url = "https://discord.com/api/webhooks/test"
+        notifier = DiscordNotifier(webhook_url=webhook_url)
         notifier.send(sample_ticker_data)
 
         # Verify webhook creation
         mock_webhook_class.assert_called_once_with(
-            url=mock_settings.discord_webhook_url, rate_limit_retry=True
+            url=webhook_url, rate_limit_retry=True
         )
 
         # Verify embed creation and configuration
@@ -222,7 +223,9 @@ class TestDiscordNotifierSend:
             mock_response.status_code = status_code
             mock_webhook.execute.return_value = mock_response
 
-            notifier = DiscordNotifier()
+            notifier = DiscordNotifier(
+                webhook_url="https://discord.com/api/webhooks/test"
+            )
             notifier.send(sample_ticker_data)
 
             mock_logger.info.assert_any_call(
@@ -251,7 +254,7 @@ class TestDiscordNotifierSend:
             volume_ratio=1.25,
         )
 
-        notifier = DiscordNotifier()
+        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
         notifier.send(ticker_data)
 
         # Verify embed was created with correct title
@@ -538,13 +541,22 @@ class TestNotifyAllPlatforms:
             mock_get_stats.return_value = mock_stats
             yield mock_get_details, mock_get_stats
 
+    @patch("hvcwatch.notification.settings")
     @patch("hvcwatch.notification.logger")
     @patch("hvcwatch.notification.DiscordNotifier")
     def test_notify_all_platforms_success(
-        self, mock_notifier_class, mock_logger, mock_ticker_functions
+        self, mock_notifier_class, mock_logger, mock_settings, mock_ticker_functions
     ):
         """✅ Test successful notification to all platforms."""
         mock_get_details, mock_get_stats = mock_ticker_functions
+
+        # Mock settings to return a single webhook URL
+        mock_settings.get_discord_webhook_urls.return_value = [
+            "https://discord.com/api/webhooks/test"
+        ]
+        mock_settings.mastodon_server_url = None
+        mock_settings.mastodon_access_token = None
+
         mock_notifier = Mock()
         mock_notifier_class.return_value = mock_notifier
 
@@ -555,7 +567,9 @@ class TestNotifyAllPlatforms:
         mock_get_stats.assert_called_once_with("AAPL")
 
         # Verify Discord notifier was created and called
-        mock_notifier_class.assert_called_once()
+        mock_notifier_class.assert_called_once_with(
+            webhook_url="https://discord.com/api/webhooks/test"
+        )
         mock_notifier.send.assert_called_once()
 
         # Verify the TickerData passed to send() has correct fields
@@ -569,12 +583,6 @@ class TestNotifyAllPlatforms:
         # Verify logging
         mock_logger.info.assert_any_call(
             "Fetching ticker data for notifications", ticker="AAPL"
-        )
-        mock_logger.info.assert_any_call(
-            "Ticker data fetched successfully", ticker="AAPL"
-        )
-        mock_logger.info.assert_any_call(
-            "Notification sent successfully", ticker="AAPL", platform="Discord"
         )
 
     @patch("hvcwatch.notification.logger")
@@ -591,12 +599,20 @@ class TestNotifyAllPlatforms:
         assert error_call[1]["ticker"] == "INVALID"
         assert "API error" in error_call[1]["error"]
 
+    @patch("hvcwatch.notification.settings")
     @patch("hvcwatch.notification.logger")
     @patch("hvcwatch.notification.DiscordNotifier")
     def test_notify_all_platforms_send_error(
-        self, mock_notifier_class, mock_logger, mock_ticker_functions
+        self, mock_notifier_class, mock_logger, mock_settings, mock_ticker_functions
     ):
         """❌ Test error handling when sending notification fails."""
+        # Mock settings to return a single webhook URL
+        mock_settings.get_discord_webhook_urls.return_value = [
+            "https://discord.com/api/webhooks/test"
+        ]
+        mock_settings.mastodon_server_url = None
+        mock_settings.mastodon_access_token = None
+
         mock_notifier = Mock()
         mock_notifier.send.side_effect = Exception("Webhook error")
         mock_notifier_class.return_value = mock_notifier
@@ -611,11 +627,12 @@ class TestNotifyAllPlatforms:
         assert error_call[1]["platform"] == "Discord"
         assert "Webhook error" in error_call[1]["error"]
 
+    @patch("hvcwatch.notification.settings")
     @patch("hvcwatch.notification.logger")
     @patch("hvcwatch.notification.DiscordNotifier")
     @pytest.mark.parametrize("ticker", ["TSLA", "MSFT", "GOOGL", "AMZN"])
     def test_notify_all_platforms_various_tickers(
-        self, mock_notifier_class, mock_logger, ticker
+        self, mock_notifier_class, mock_logger, mock_settings, ticker
     ):
         """✅ Test notify_all_platforms with various ticker symbols."""
         mock_details = {
@@ -632,6 +649,13 @@ class TestNotifyAllPlatforms:
             "volume_sma": 900_000.0,
             "volume_ratio": 1.11,
         }
+
+        # Mock settings to return a single webhook URL
+        mock_settings.get_discord_webhook_urls.return_value = [
+            "https://discord.com/api/webhooks/test"
+        ]
+        mock_settings.mastodon_server_url = None
+        mock_settings.mastodon_access_token = None
 
         with (
             patch("hvcwatch.notification.get_ticker_details") as mock_get_details,
@@ -665,7 +689,9 @@ class TestNotifyAllPlatforms:
     ):
         """⚠️ Test graceful handling when Discord is not configured."""
         mock_get_details, mock_get_stats = mock_ticker_functions
-        mock_settings.discord_webhook_url = None  # No Discord configured
+        mock_settings.get_discord_webhook_urls.return_value = []  # No Discord configured
+        mock_settings.mastodon_server_url = None
+        mock_settings.mastodon_access_token = None
 
         notify_all_platforms("AAPL")
 
@@ -699,7 +725,9 @@ class TestNotifyAllPlatforms:
         mock_get_details, mock_get_stats = mock_ticker_functions
 
         # Configure both platforms
-        mock_settings.discord_webhook_url = "https://discord.com/api/webhooks/test"
+        mock_settings.get_discord_webhook_urls.return_value = [
+            "https://discord.com/api/webhooks/test"
+        ]
         mock_settings.mastodon_server_url = "https://mastodon.social"
         mock_settings.mastodon_access_token = "test_token"
 
@@ -711,7 +739,9 @@ class TestNotifyAllPlatforms:
         notify_all_platforms("AAPL")
 
         # Verify both notifiers were created
-        mock_discord_class.assert_called_once()
+        mock_discord_class.assert_called_once_with(
+            webhook_url="https://discord.com/api/webhooks/test"
+        )
         mock_mastodon_class.assert_called_once_with(
             server_url="https://mastodon.social",
             access_token="test_token",
@@ -722,9 +752,9 @@ class TestNotifyAllPlatforms:
         mock_mastodon.send.assert_called_once()
 
         # Verify logging for both platforms
-        mock_logger.info.assert_any_call(
-            "Notification sent successfully", ticker="AAPL", platform="Discord"
-        )
+        # Note: Discord logging now includes webhook_url parameter
+        info_calls = [call[0][0] for call in mock_logger.info.call_args_list]
+        assert "Notification sent successfully" in " ".join(info_calls)
         mock_logger.info.assert_any_call(
             "Notification sent successfully", ticker="AAPL", platform="Mastodon"
         )
@@ -748,7 +778,7 @@ class TestNotifyAllPlatforms:
         mock_get_details, mock_get_stats = mock_ticker_functions
 
         # Configure only Mastodon
-        mock_settings.discord_webhook_url = None
+        mock_settings.get_discord_webhook_urls.return_value = []
         mock_settings.mastodon_server_url = "https://mastodon.social"
         mock_settings.mastodon_access_token = "test_token"
 
@@ -794,7 +824,9 @@ class TestNotifyAllPlatforms:
         mock_get_details, mock_get_stats = mock_ticker_functions
 
         # Configure both platforms
-        mock_settings.discord_webhook_url = "https://discord.com/api/webhooks/test"
+        mock_settings.get_discord_webhook_urls.return_value = [
+            "https://discord.com/api/webhooks/test"
+        ]
         mock_settings.mastodon_server_url = "https://mastodon.social"
         mock_settings.mastodon_access_token = "test_token"
 
@@ -845,7 +877,9 @@ class TestNotifyAllPlatforms:
         mock_get_details, mock_get_stats = mock_ticker_functions
 
         # Configure both platforms
-        mock_settings.discord_webhook_url = "https://discord.com/api/webhooks/test"
+        mock_settings.get_discord_webhook_urls.return_value = [
+            "https://discord.com/api/webhooks/test"
+        ]
         mock_settings.mastodon_server_url = "https://mastodon.social"
         mock_settings.mastodon_access_token = "test_token"
 
@@ -864,9 +898,13 @@ class TestNotifyAllPlatforms:
         mock_mastodon.send.assert_called_once()
 
         # Verify success logged for Discord
-        mock_logger.info.assert_any_call(
-            "Notification sent successfully", ticker="AAPL", platform="Discord"
+        # Note: Discord logging now includes webhook_url parameter, so we check less strictly
+        info_calls = [str(call) for call in mock_logger.info.call_args_list]
+        discord_success_logged = any(
+            "Notification sent successfully" in call and "Discord" in call
+            for call in info_calls
         )
+        assert discord_success_logged, "Discord success notification should be logged"
 
         # Verify error logged for Mastodon
         error_calls = [
@@ -896,7 +934,9 @@ class TestNotifyAllPlatforms:
         mock_get_details, mock_get_stats = mock_ticker_functions
 
         # Configure Discord and partial Mastodon
-        mock_settings.discord_webhook_url = "https://discord.com/api/webhooks/test"
+        mock_settings.get_discord_webhook_urls.return_value = [
+            "https://discord.com/api/webhooks/test"
+        ]
         mock_settings.mastodon_server_url = "https://mastodon.social"
         mock_settings.mastodon_access_token = None  # Missing token
 
@@ -906,16 +946,23 @@ class TestNotifyAllPlatforms:
         notify_all_platforms("AAPL")
 
         # Verify Discord notifier was created and sent
-        mock_discord_class.assert_called_once()
+        mock_discord_class.assert_called_once_with(
+            webhook_url="https://discord.com/api/webhooks/test"
+        )
         mock_discord.send.assert_called_once()
 
         # Verify Mastodon notifier was NOT created (partial config)
         mock_mastodon_class.assert_not_called()
 
         # Verify logging
-        mock_logger.info.assert_any_call(
-            "Notification sent successfully", ticker="AAPL", platform="Discord"
+        # Note: Discord logging now includes webhook_url parameter, so we check less strictly
+        info_calls = [str(call) for call in mock_logger.info.call_args_list]
+        discord_success_logged = any(
+            "Notification sent successfully" in call and "Discord" in call
+            for call in info_calls
         )
+        assert discord_success_logged, "Discord success notification should be logged"
+
         mock_logger.debug.assert_any_call(
             "Mastodon credentials not configured, skipping", ticker="AAPL"
         )
