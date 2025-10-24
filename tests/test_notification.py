@@ -11,6 +11,13 @@ from hvcwatch.notification import (
 )
 
 
+# Mock sentry_sdk for all tests in this module
+@pytest.fixture(autouse=True)
+def mock_sentry():
+    with patch("hvcwatch.notification.sentry_sdk"):
+        yield
+
+
 @pytest.fixture
 def sample_ticker_data() -> TickerData:
     """Create sample TickerData for testing."""

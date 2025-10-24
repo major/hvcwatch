@@ -11,6 +11,13 @@ from hvcwatch.email_monitor import (
 )
 
 
+# Mock sentry_sdk for all tests in this module
+@pytest.fixture(autouse=True)
+def mock_sentry():
+    with patch("hvcwatch.email_monitor.sentry_sdk"):
+        yield
+
+
 @pytest.fixture
 def mock_mailbox():
     mailbox = MagicMock()

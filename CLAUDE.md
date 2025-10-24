@@ -28,6 +28,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **[config.py](src/hvcwatch/config.py)**: Pydantic Settings for environment variables (`.env` file)
   - Required: `FASTMAIL_USER`, `FASTMAIL_PASS`, `DISCORD_WEBHOOK_URL`, `POLYGON_API_KEY`
   - Optional: `MASTODON_SERVER_URL`, `MASTODON_ACCESS_TOKEN` (both required to enable Mastodon)
+  - Optional: `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_TRACES_SAMPLE_RATE` (for error tracking)
   - IMAP settings default to Fastmail with folder `Trading/ToS Alerts`
 
 - **[models.py](src/hvcwatch/models.py)**: Data models for type-safe ticker data
@@ -61,6 +62,49 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
     - Sends to all enabled platforms (checks credentials)
     - Graceful error handling (one platform can fail without affecting others)
     - Logs success/failure per platform separately
+
+- **[main.py](src/hvcwatch/main.py)**: Application entry point
+  - Initializes Sentry error tracking if `SENTRY_DSN` is provided
+  - Sets up logging and starts email monitoring
+  - Sentry breadcrumbs track key operations for better error debugging
+
+## Error Tracking with Sentry 🔍
+
+The bot integrates with Sentry.io for comprehensive error tracking and monitoring:
+
+### Configuration
+
+Add these optional environment variables to your `.env` file:
+
+```bash
+# Sentry.io Configuration (optional)
+SENTRY_DSN=https://your-project-key@your-org.sentry.io/your-project-id
+SENTRY_ENVIRONMENT=production  # or development, staging, etc. (default: production)
+SENTRY_TRACES_SAMPLE_RATE=1.0  # 0.0 to 1.0 (default: 1.0)
+```
+
+### Features
+
+- **Automatic Exception Capture**: All unhandled exceptions are automatically sent to Sentry
+- **Breadcrumbs**: Key operations are tracked as breadcrumbs for better debugging context:
+  - IMAP connection and monitoring events
+  - Email processing and ticker extraction
+  - Market data fetching from Polygon.io
+  - Notification sending to Discord/Mastodon
+- **Contextual Data**: Exceptions include local variables, stack traces, and execution context
+- **Graceful Degradation**: If Sentry DSN is not configured, the bot runs normally without error tracking
+
+### Breadcrumb Categories
+
+The following breadcrumb categories are used throughout the application:
+
+- `imap`: IMAP connection and email monitoring events
+- `email`: Email processing, ticker extraction, and filtering
+- `notification`: Ticker data fetching and notification sending
+
+### Testing
+
+When running tests, Sentry is automatically mocked to avoid sending test data to your Sentry project. Test fixtures in `test_main.py`, `test_email_monitor.py`, and `test_notification.py` ensure Sentry integration doesn't interfere with test execution.
 
 ## Development Commands
 

@@ -1,6 +1,7 @@
 import logging
 from typing import Protocol
 
+import sentry_sdk
 import structlog
 from discord_webhook import DiscordEmbed, DiscordWebhook
 from mastodon import Mastodon
@@ -83,6 +84,16 @@ class DiscordNotifier:
             ticker_data: Enriched ticker data to send
         """
         logger.info("Sending to Discord", ticker=ticker_data.ticker)
+        sentry_sdk.add_breadcrumb(
+            category="notification",
+            message="Sending Discord notification",
+            level="info",
+            data={
+                "ticker": ticker_data.ticker,
+                "platform": "Discord",
+            },
+        )
+
         webhook = DiscordWebhook(
             url=settings.discord_webhook_url,
             rate_limit_retry=True,
@@ -191,6 +202,15 @@ class MastodonNotifier:
             Exception: Logs errors from Mastodon API but doesn't raise
         """
         logger.info("Sending to Mastodon", ticker=ticker_data.ticker)
+        sentry_sdk.add_breadcrumb(
+            category="notification",
+            message="Sending Mastodon notification",
+            level="info",
+            data={
+                "ticker": ticker_data.ticker,
+                "platform": "Mastodon",
+            },
+        )
 
         try:
             status_text = self.build_status(ticker_data)
@@ -236,6 +256,12 @@ def notify_all_platforms(ticker: str) -> None:
         Exception: Logs errors but doesn't raise, allowing other platforms to continue
     """
     logger.info("Fetching ticker data for notifications", ticker=ticker)
+    sentry_sdk.add_breadcrumb(
+        category="notification",
+        message="Starting notification process",
+        level="info",
+        data={"ticker": ticker},
+    )
 
     try:
         # Fetch ticker data once for all platforms
@@ -256,9 +282,20 @@ def notify_all_platforms(ticker: str) -> None:
         )
 
         logger.info("Ticker data fetched successfully", ticker=ticker)
+        sentry_sdk.add_breadcrumb(
+            category="notification",
+            message="Ticker data fetched successfully",
+            level="info",
+            data={
+                "ticker": ticker,
+                "company": ticker_data.name,
+                "price": ticker_data.price,
+            },
+        )
 
     except Exception as e:
         logger.error("Failed to fetch ticker data", ticker=ticker, error=str(e))
+        sentry_sdk.capture_exception(e)
         return
 
     # Track if at least one notification was sent

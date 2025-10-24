@@ -25,6 +25,14 @@ class Settings(BaseSettings):
 
     polygon_api_key: str = Field(..., description="Polygon.io API key")
 
+    sentry_dsn: str | None = Field(
+        None, description="Sentry DSN for error tracking (optional)"
+    )
+    sentry_environment: str = Field("production", description="Sentry environment name")
+    sentry_traces_sample_rate: float = Field(
+        1.0, description="Sentry traces sample rate (0.0 to 1.0)"
+    )
+
     log_level: str = Field("INFO", description="Log level")
 
     imap_host: str = Field("imap.fastmail.com", description="IMAP server host")
