@@ -22,13 +22,6 @@ class Settings(BaseSettings):
         None, description="Comma-separated Discord webhook URLs"
     )
 
-    mastodon_server_url: str | None = Field(
-        None, description="Mastodon server URL (e.g., 'https://mastodon.social')"
-    )
-    mastodon_access_token: str | None = Field(
-        None, description="Mastodon user access token for posting statuses"
-    )
-
     polygon_api_key: str = Field(..., description="Polygon.io API key")
 
     hvcwatch_db_path: str | None = Field(
