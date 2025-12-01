@@ -1,18 +1,15 @@
-import logging
 import re
 from datetime import date, datetime, timedelta
 from typing import Literal
 
 import pandas_market_calendars as mcal
 import pytz
-import structlog
 
-logging.basicConfig(level=logging.INFO)
-logger = structlog.get_logger()
+from hvcwatch.logging import logger
 
 
 def extract_tickers(subject: str) -> list[str]:
-    logger.info("Extracting tickers", subject=subject)
+    logger.info("Extracting tickers subject={subject}", subject=subject)
     pattern = r"symbols?:\s*([\w/,\s]+)\s+(?:were|was)\s+added"
     tickers_re = re.compile(pattern, re.IGNORECASE)
     match = tickers_re.search(subject)
@@ -21,7 +18,7 @@ def extract_tickers(subject: str) -> list[str]:
         tickers = [
             x.strip().upper() for x in match.group(1).split(",") if "/" not in x.strip()
         ]
-        logger.info("Extracted tickers", tickers=tickers)
+        logger.info("Extracted tickers tickers={tickers}", tickers=tickers)
         return tickers
     else:
         logger.info("No tickers found in subject")

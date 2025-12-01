@@ -1,14 +1,10 @@
-import logging
 from typing import Literal, Protocol
 
 import sentry_sdk
-import structlog
 from discord_webhook import DiscordEmbed, DiscordWebhook
 
 from hvcwatch.config import settings
-
-logging.basicConfig(level=logging.INFO)
-logger = structlog.get_logger()
+from hvcwatch.logging import logger
 
 # Type alias for timeframe
 Timeframe = Literal["daily", "weekly", "monthly"]
@@ -59,7 +55,11 @@ class DiscordNotifier:
             ticker: Stock ticker symbol (e.g., "AAPL")
             timeframe: Alert timeframe ("daily", "weekly", or "monthly")
         """
-        logger.info("Sending to Discord", ticker=ticker, timeframe=timeframe)
+        logger.info(
+            "Sending to Discord ticker={ticker} timeframe={timeframe}",
+            ticker=ticker,
+            timeframe=timeframe,
+        )
         sentry_sdk.add_breadcrumb(
             category="notification",
             message="Sending Discord notification",
@@ -90,7 +90,10 @@ class DiscordNotifier:
         embed.set_timestamp()
         webhook.add_embed(embed)
         response = webhook.execute()
-        logger.info("Discord response", status_code=response.status_code)
+        logger.info(
+            "Discord response status_code={status_code}",
+            status_code=response.status_code,
+        )
 
 
 def notify_all_platforms(ticker: str, timeframe: Timeframe = "daily") -> None:
@@ -103,7 +106,11 @@ def notify_all_platforms(ticker: str, timeframe: Timeframe = "daily") -> None:
         ticker: Stock ticker symbol (e.g., "AAPL")
         timeframe: Alert timeframe ("daily", "weekly", or "monthly")
     """
-    logger.info("Sending notifications", ticker=ticker, timeframe=timeframe)
+    logger.info(
+        "Sending notifications ticker={ticker} timeframe={timeframe}",
+        ticker=ticker,
+        timeframe=timeframe,
+    )
     sentry_sdk.add_breadcrumb(
         category="notification",
         message="Starting notification process",
@@ -122,7 +129,7 @@ def notify_all_platforms(ticker: str, timeframe: Timeframe = "daily") -> None:
                 discord_notifier = DiscordNotifier(webhook_url=webhook_url)
                 discord_notifier.send(ticker, timeframe)
                 logger.info(
-                    "Notification sent successfully",
+                    "Notification sent successfully ticker={ticker} timeframe={timeframe} platform={platform} webhook_url={webhook_url}",
                     ticker=ticker,
                     timeframe=timeframe,
                     platform="Discord",
@@ -131,18 +138,20 @@ def notify_all_platforms(ticker: str, timeframe: Timeframe = "daily") -> None:
                 notifications_sent += 1
             except Exception as e:
                 logger.error(
-                    "Failed to send notification",
+                    "Failed to send notification ticker={ticker} platform={platform} webhook_url={webhook_url} error={error}",
                     ticker=ticker,
                     platform="Discord",
                     webhook_url=webhook_url[:50] + "...",  # Truncate for logging
                     error=str(e),
                 )
     else:
-        logger.debug("Discord webhook not configured, skipping", ticker=ticker)
+        logger.debug(
+            "Discord webhook not configured, skipping ticker={ticker}", ticker=ticker
+        )
 
     # Warn if no notifications were sent at all
     if notifications_sent == 0:
         logger.warning(
-            "No notifications sent - no Discord webhooks configured",
+            "No notifications sent - no Discord webhooks configured ticker={ticker}",
             ticker=ticker,
         )

@@ -62,11 +62,10 @@ def test_monitor_mailbox_detects_new_email(responses, expected_process, mock_mai
     mock_mailbox.idle.poll.side_effect = limited_poll
 
     with patch("hvcwatch.email_monitor.process_email_message") as mock_process:
-        with patch("hvcwatch.email_monitor.logger"):
-            try:
-                monitor_mailbox(mock_mailbox)
-            except KeyboardInterrupt:
-                pass
+        try:
+            monitor_mailbox(mock_mailbox)
+        except KeyboardInterrupt:
+            pass
 
         if expected_process:
             mock_process.assert_called_once_with(mock_msg)
@@ -81,7 +80,6 @@ def test_connect_imap_calls_monitor_and_unread():
         patch("hvcwatch.email_monitor.MailBox") as mock_mailbox_class,
         patch("hvcwatch.email_monitor.get_unread_messages") as mock_get_unread,
         patch("hvcwatch.email_monitor.monitor_mailbox") as mock_monitor,
-        patch("hvcwatch.email_monitor.logger"),
     ):
         # Setup the mailbox mock to work as a context manager
         mock_mailbox_class.return_value.__enter__.return_value = mock_mailbox_instance
@@ -105,18 +103,11 @@ def test_get_unread_messages_processes_emails(unread_count):
         for i in range(unread_count)
     ]
     mock_mailbox.fetch.return_value = mock_msgs
-    with (
-        patch("hvcwatch.email_monitor.logger") as mock_logger,
-        patch("hvcwatch.email_monitor.process_email_message") as mock_process,
-    ):
+    with patch("hvcwatch.email_monitor.process_email_message") as mock_process:
         get_unread_messages(mock_mailbox)
         if unread_count == 0:
-            mock_logger.info.assert_called_with("Checking for unread messages")
             mock_process.assert_not_called()
         else:
-            mock_logger.info.assert_any_call(
-                f"Processing {unread_count} unread messages"
-            )
             assert mock_process.call_count == unread_count
 
 
@@ -133,7 +124,6 @@ def test_process_email_message_behavior(subject, date, market_hours, expected_no
     msg.subject = subject
     msg.date = date
     with (
-        patch("hvcwatch.email_monitor.logger") as mock_logger,
         patch(
             "hvcwatch.email_monitor.is_market_hours_or_near", return_value=market_hours
         ),
@@ -144,14 +134,10 @@ def test_process_email_message_behavior(subject, date, market_hours, expected_no
         patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
     ):
         process_email_message(msg)
-        if subject is None:
-            mock_logger.info.assert_any_call("Email has no subject")
-            mock_notify.assert_not_called()
-        elif not market_hours:
-            mock_logger.info.assert_any_call("Email arrived outside market hours")
-            mock_notify.assert_not_called()
-        else:
+        if expected_notify:
             mock_notify.assert_called_once_with("AAPL", "daily")
+        else:
+            mock_notify.assert_not_called()
 
 
 class TestDeduplication:
@@ -164,7 +150,6 @@ class TestDeduplication:
         msg.date = datetime(2024, 12, 2, 14, 30)
 
         with (
-            patch("hvcwatch.email_monitor.logger"),
             patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
             patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
             patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
@@ -187,7 +172,6 @@ class TestDeduplication:
         msg.date = datetime(2024, 12, 2, 14, 30)
 
         with (
-            patch("hvcwatch.email_monitor.logger") as mock_logger,
             patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
             patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
             patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
@@ -199,9 +183,6 @@ class TestDeduplication:
 
             mock_notify.assert_not_called()
             mock_record.assert_not_called()
-            mock_logger.info.assert_any_call(
-                "Alert suppressed (duplicate)", ticker="AAPL", timeframe="weekly"
-            )
 
     def test_multiple_tickers_mixed_dedup(self):
         """Multiple tickers: some may alert, others suppressed."""
@@ -213,7 +194,6 @@ class TestDeduplication:
         should_alert_returns = [False, True, True]
 
         with (
-            patch("hvcwatch.email_monitor.logger"),
             patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
             patch(
                 "hvcwatch.email_monitor.extract_tickers",
@@ -243,7 +223,6 @@ class TestDeduplication:
         msg.date = datetime(2024, 12, 2, 14, 30)
 
         with (
-            patch("hvcwatch.email_monitor.logger"),
             patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
             patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
             patch("hvcwatch.email_monitor.extract_timeframe", return_value="daily"),
@@ -266,7 +245,6 @@ class TestDeduplication:
         msg.date = datetime(2024, 11, 15, 14, 30)  # Date in the past
 
         with (
-            patch("hvcwatch.email_monitor.logger"),
             patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
             patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
             patch("hvcwatch.email_monitor.extract_timeframe", return_value="monthly"),

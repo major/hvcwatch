@@ -9,11 +9,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Literal
 
-import structlog
-
 from hvcwatch.config import settings
-
-logger = structlog.get_logger()
+from hvcwatch.logging import logger
 
 TimeframeType = Literal["daily", "weekly", "monthly"]
 
@@ -85,7 +82,11 @@ def should_alert(ticker: str, timeframe: TimeframeType, alert_date: date) -> boo
 
         if row is None:
             # No previous alert - allow
-            logger.debug("No previous alert found", ticker=ticker, timeframe=timeframe)
+            logger.debug(
+                "No previous alert found ticker={ticker} timeframe={timeframe}",
+                ticker=ticker,
+                timeframe=timeframe,
+            )
             return True
 
         last_alert_date = date.fromisoformat(row[0])
@@ -96,7 +97,7 @@ def should_alert(ticker: str, timeframe: TimeframeType, alert_date: date) -> boo
             current_monday = _get_week_monday(alert_date)
             should_send = last_monday != current_monday
             logger.debug(
-                "Weekly dedup check",
+                "Weekly dedup check ticker={ticker} last_alert={last_alert} last_monday={last_monday} current_monday={current_monday} should_alert={should_alert}",
                 ticker=ticker,
                 last_alert=str(last_alert_date),
                 last_monday=str(last_monday),
@@ -112,7 +113,7 @@ def should_alert(ticker: str, timeframe: TimeframeType, alert_date: date) -> boo
                 alert_date.month,
             )
             logger.debug(
-                "Monthly dedup check",
+                "Monthly dedup check ticker={ticker} last_alert={last_alert} current_date={current_date} should_alert={should_alert}",
                 ticker=ticker,
                 last_alert=str(last_alert_date),
                 current_date=str(alert_date),
@@ -146,7 +147,7 @@ def record_alert(ticker: str, timeframe: TimeframeType, alert_date: date) -> Non
         )
         conn.commit()
         logger.debug(
-            "Recorded alert",
+            "Recorded alert ticker={ticker} timeframe={timeframe} alert_date={alert_date}",
             ticker=ticker,
             timeframe=timeframe,
             alert_date=str(alert_date),

@@ -67,8 +67,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **[main.py](src/hvcwatch/main.py)**: Application entry point
   - Initializes Sentry error tracking if `SENTRY_DSN` is provided
-  - Sets up logging and starts email monitoring
+  - Starts email monitoring
   - Sentry breadcrumbs track key operations for better error debugging
+
+- **[logging.py](src/hvcwatch/logging.py)**: Centralized logging configuration
+  - Uses loguru for pretty, structured logging
+  - Configured at INFO level by default
+  - All modules import logger from here: `from hvcwatch.logging import logger`
+  - Log format: `logger.info("message key={key}", key=value)` (inline templating)
 
 ## Error Tracking with Sentry 🔍
 
@@ -144,7 +150,7 @@ uv run hvcwatch  # Entry point defined in pyproject.toml
 
 - **uv**: Package/project manager (replaces pip/venv)
 - **Python**: 3.13 (specified in `.python-version`)
-- **Key libraries**: pydantic-settings, structlog, imap-tools, polygon-api-client, discord-webhook, polars
+- **Key libraries**: pydantic-settings, loguru, imap-tools, polygon-api-client, discord-webhook, polars
 - **Dev tools**: pyright, pytest, ruff
 
 ## Important Implementation Details

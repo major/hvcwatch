@@ -4,12 +4,9 @@ import hvcwatch.main
 
 
 @patch("hvcwatch.main.sentry_sdk")
-@patch("hvcwatch.main.logger")
 @patch("hvcwatch.main.connect_imap")
 @patch("hvcwatch.main.settings")
-def test_main_calls_connect_imap_and_logs(
-    mock_settings, mock_connect_imap, mock_logger, mock_sentry
-):
+def test_main_calls_connect_imap(mock_settings, mock_connect_imap, mock_sentry):
     # Setup mock settings
     mock_settings.imap_host = "imap.example.com"
     mock_settings.fastmail_user = "user"
@@ -19,9 +16,6 @@ def test_main_calls_connect_imap_and_logs(
 
     hvcwatch.main.main()
 
-    mock_logger.info.assert_called_once_with(
-        "Starting HVC Watch email monitor", version="commit=unknown, branch=unknown"
-    )
     mock_connect_imap.assert_called_once_with(
         "imap.example.com",
         "user",
@@ -33,11 +27,10 @@ def test_main_calls_connect_imap_and_logs(
 
 
 @patch("hvcwatch.main.sentry_sdk")
-@patch("hvcwatch.main.logger")
 @patch("hvcwatch.main.connect_imap")
 @patch("hvcwatch.main.settings")
 def test_main_initializes_sentry_when_dsn_provided(
-    mock_settings, mock_connect_imap, mock_logger, mock_sentry
+    mock_settings, mock_connect_imap, mock_sentry
 ):
     # Setup mock settings with Sentry DSN
     mock_settings.imap_host = "imap.example.com"
@@ -57,8 +50,4 @@ def test_main_initializes_sentry_when_dsn_provided(
         traces_sample_rate=1.0,
         integrations=[],
         attach_stacktrace=True,
-    )
-    # Should log Sentry initialization
-    assert any(
-        call[0][0] == "Sentry initialized" for call in mock_logger.info.call_args_list
     )

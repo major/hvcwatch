@@ -1,18 +1,14 @@
-import logging
 from datetime import date
 
 import sentry_sdk
-import structlog
 from imap_tools.mailbox import BaseMailBox, MailBox
 from imap_tools.message import MailMessage
 from imap_tools.query import AND, A
 
 from hvcwatch.db import record_alert, should_alert
+from hvcwatch.logging import logger
 from hvcwatch.notification import notify_all_platforms
 from hvcwatch.utils import extract_tickers, extract_timeframe, is_market_hours_or_near
-
-logging.basicConfig(level=logging.INFO)
-logger = structlog.get_logger()
 
 
 def connect_imap(host: str, user: str, password: str, folder: str) -> None:
@@ -101,7 +97,7 @@ def get_unread_messages(mailbox: BaseMailBox) -> None:
 
     for msg in unread_messages:
         logger.info(
-            "Found unread email",
+            "Found unread email subject={subject} date={date}",
             subject=msg.subject,
             date=msg.date.strftime("%Y-%m-%d %H:%M"),
         )
@@ -166,8 +162,14 @@ def process_email_message(msg: MailMessage) -> None:
         if should_alert(ticker, timeframe, alert_date):
             notify_all_platforms(ticker, timeframe)
             record_alert(ticker, timeframe, alert_date)
-            logger.info("Alert sent", ticker=ticker, timeframe=timeframe)
+            logger.info(
+                "Alert sent ticker={ticker} timeframe={timeframe}",
+                ticker=ticker,
+                timeframe=timeframe,
+            )
         else:
             logger.info(
-                "Alert suppressed (duplicate)", ticker=ticker, timeframe=timeframe
+                "Alert suppressed (duplicate) ticker={ticker} timeframe={timeframe}",
+                ticker=ticker,
+                timeframe=timeframe,
             )
