@@ -1,6 +1,7 @@
 import logging
 import re
 from datetime import date, datetime, timedelta
+from typing import Literal
 
 import pandas_market_calendars as mcal
 import polars as pl
@@ -43,6 +44,31 @@ def extract_tickers(subject: str) -> list[str]:
     else:
         logger.info("No tickers found in subject")
         return []
+
+
+def extract_timeframe(subject: str) -> Literal["daily", "weekly", "monthly"]:
+    """
+    Extract HVC timeframe from email subject.
+
+    Args:
+        subject: Email subject line to parse
+
+    Returns:
+        "weekly" if subject contains "weekly"
+        "monthly" if subject contains "monthly"
+        "daily" otherwise (default)
+
+    Examples:
+        "...added to HVC Weekly" -> "weekly"
+        "...added to HVC Monthly" -> "monthly"
+        "...added to HVC" -> "daily"
+    """
+    subject_lower = subject.lower()
+    if "weekly" in subject_lower:
+        return "weekly"
+    elif "monthly" in subject_lower:
+        return "monthly"
+    return "daily"
 
 
 def get_ticker_logo(ticker: str) -> str:

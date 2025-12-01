@@ -1,4 +1,5 @@
 import logging
+from datetime import date
 
 import sentry_sdk
 import structlog
@@ -6,8 +7,9 @@ from imap_tools.mailbox import BaseMailBox, MailBox
 from imap_tools.message import MailMessage
 from imap_tools.query import AND, A
 
+from hvcwatch.db import record_alert, should_alert
 from hvcwatch.notification import notify_all_platforms
-from hvcwatch.utils import extract_tickers, is_market_hours_or_near
+from hvcwatch.utils import extract_tickers, extract_timeframe, is_market_hours_or_near
 
 logging.basicConfig(level=logging.INFO)
 logger = structlog.get_logger()
@@ -150,12 +152,22 @@ def process_email_message(msg: MailMessage) -> None:
         return
 
     tickers = extract_tickers(msg.subject)
+    timeframe = extract_timeframe(msg.subject)
+    alert_date = msg.date.date() if msg.date else date.today()
+
     sentry_sdk.add_breadcrumb(
         category="email",
         message=f"Extracted {len(tickers)} ticker(s)",
         level="info",
-        data={"tickers": tickers},
+        data={"tickers": tickers, "timeframe": timeframe},
     )
 
     for ticker in tickers:
-        notify_all_platforms(ticker)
+        if should_alert(ticker, timeframe, alert_date):
+            notify_all_platforms(ticker)
+            record_alert(ticker, timeframe, alert_date)
+            logger.info("Alert sent", ticker=ticker, timeframe=timeframe)
+        else:
+            logger.info(
+                "Alert suppressed (duplicate)", ticker=ticker, timeframe=timeframe
+            )

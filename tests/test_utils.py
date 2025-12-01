@@ -6,6 +6,7 @@ import pandas as pd
 
 from hvcwatch.utils import (
     extract_tickers,
+    extract_timeframe,
     format_number,
     get_ticker_logo,
     get_ticker_details,
@@ -95,6 +96,29 @@ class TestExtractTickers:
         """Test ticker extraction with various subject line formats."""
         result = extract_tickers(subject_line)
         assert result == expected
+
+
+class TestExtractTimeframe:
+    """Test cases for extract_timeframe function."""
+
+    @pytest.mark.parametrize(
+        "subject,expected",
+        [
+            ("Alert: New symbols: IPG, PTCT were added to HVC Weekly", "weekly"),
+            ("Alert: New symbols: ABC were added to HVC Monthly", "monthly"),
+            ("Alert: New symbols: XYZ were added to HVC", "daily"),
+            ("Alert: New symbols: XYZ were added to HVC.", "daily"),
+            ("symbols: FOO were added to HVC WEEKLY", "weekly"),  # case insensitive
+            ("symbols: FOO were added to HVC weekly", "weekly"),  # lowercase
+            ("symbols: BAR were added to HVC MONTHLY", "monthly"),  # uppercase
+            ("HVC Monthly Alert: ABC added", "monthly"),  # Different format
+            ("Weekly HVC Alert", "weekly"),  # Keyword at start
+            ("Random email without timeframe", "daily"),  # Default to daily
+        ],
+    )
+    def test_extract_timeframe(self, subject, expected):
+        """Test timeframe extraction from various subject formats."""
+        assert extract_timeframe(subject) == expected
 
 
 class TestFormatNumber:

@@ -31,6 +31,10 @@ class Settings(BaseSettings):
 
     polygon_api_key: str = Field(..., description="Polygon.io API key")
 
+    hvcwatch_db_path: str | None = Field(
+        None, description="Path to SQLite database for alert tracking"
+    )
+
     sentry_dsn: str | None = Field(
         None, description="Sentry DSN for error tracking (optional)"
     )

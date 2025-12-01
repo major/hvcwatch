@@ -138,6 +138,9 @@ def test_process_email_message_behavior(subject, date, market_hours, expected_no
             "hvcwatch.email_monitor.is_market_hours_or_near", return_value=market_hours
         ),
         patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
+        patch("hvcwatch.email_monitor.extract_timeframe", return_value="daily"),
+        patch("hvcwatch.email_monitor.should_alert", return_value=True),
+        patch("hvcwatch.email_monitor.record_alert"),
         patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
     ):
         process_email_message(msg)
@@ -149,3 +152,133 @@ def test_process_email_message_behavior(subject, date, market_hours, expected_no
             mock_notify.assert_not_called()
         else:
             mock_notify.assert_called_once_with("AAPL")
+
+
+class TestDeduplication:
+    """Test cases for HVC alert deduplication."""
+
+    def test_weekly_alert_sends_and_records(self):
+        """Weekly alerts should send notification and record to database."""
+        msg = MagicMock()
+        msg.subject = "Alert: New symbols: AAPL were added to HVC Weekly"
+        msg.date = datetime(2024, 12, 2, 14, 30)
+
+        with (
+            patch("hvcwatch.email_monitor.logger"),
+            patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
+            patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
+            patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
+            patch(
+                "hvcwatch.email_monitor.should_alert", return_value=True
+            ) as mock_should,
+            patch("hvcwatch.email_monitor.record_alert") as mock_record,
+            patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
+        ):
+            process_email_message(msg)
+
+            mock_should.assert_called_once_with("AAPL", "weekly", msg.date.date())
+            mock_notify.assert_called_once_with("AAPL")
+            mock_record.assert_called_once_with("AAPL", "weekly", msg.date.date())
+
+    def test_duplicate_alert_suppressed(self):
+        """Duplicate alerts should be suppressed (no notification, no record)."""
+        msg = MagicMock()
+        msg.subject = "Alert: New symbols: AAPL were added to HVC Weekly"
+        msg.date = datetime(2024, 12, 2, 14, 30)
+
+        with (
+            patch("hvcwatch.email_monitor.logger") as mock_logger,
+            patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
+            patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
+            patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
+            patch("hvcwatch.email_monitor.should_alert", return_value=False),
+            patch("hvcwatch.email_monitor.record_alert") as mock_record,
+            patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
+        ):
+            process_email_message(msg)
+
+            mock_notify.assert_not_called()
+            mock_record.assert_not_called()
+            mock_logger.info.assert_any_call(
+                "Alert suppressed (duplicate)", ticker="AAPL", timeframe="weekly"
+            )
+
+    def test_multiple_tickers_mixed_dedup(self):
+        """Multiple tickers: some may alert, others suppressed."""
+        msg = MagicMock()
+        msg.subject = "Alert: New symbols: AAPL, MSFT, NVDA were added to HVC Weekly"
+        msg.date = datetime(2024, 12, 2, 14, 30)
+
+        # AAPL is duplicate, MSFT and NVDA are new
+        should_alert_returns = [False, True, True]
+
+        with (
+            patch("hvcwatch.email_monitor.logger"),
+            patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
+            patch(
+                "hvcwatch.email_monitor.extract_tickers",
+                return_value=["AAPL", "MSFT", "NVDA"],
+            ),
+            patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
+            patch(
+                "hvcwatch.email_monitor.should_alert", side_effect=should_alert_returns
+            ),
+            patch("hvcwatch.email_monitor.record_alert") as mock_record,
+            patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
+        ):
+            process_email_message(msg)
+
+            # Only MSFT and NVDA should send
+            assert mock_notify.call_count == 2
+            mock_notify.assert_any_call("MSFT")
+            mock_notify.assert_any_call("NVDA")
+
+            # Only MSFT and NVDA should be recorded
+            assert mock_record.call_count == 2
+
+    def test_daily_always_alerts(self):
+        """Daily timeframe should always alert (no deduplication)."""
+        msg = MagicMock()
+        msg.subject = "Alert: New symbols: AAPL were added to HVC"
+        msg.date = datetime(2024, 12, 2, 14, 30)
+
+        with (
+            patch("hvcwatch.email_monitor.logger"),
+            patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
+            patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
+            patch("hvcwatch.email_monitor.extract_timeframe", return_value="daily"),
+            patch(
+                "hvcwatch.email_monitor.should_alert", return_value=True
+            ) as mock_should,
+            patch("hvcwatch.email_monitor.record_alert") as mock_record,
+            patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
+        ):
+            process_email_message(msg)
+
+            mock_should.assert_called_once_with("AAPL", "daily", msg.date.date())
+            mock_notify.assert_called_once_with("AAPL")
+            mock_record.assert_called_once()
+
+    def test_uses_email_date_for_alert_date(self):
+        """Should use email date (not today) for deduplication checks."""
+        msg = MagicMock()
+        msg.subject = "Alert: New symbols: AAPL were added to HVC Monthly"
+        msg.date = datetime(2024, 11, 15, 14, 30)  # Date in the past
+
+        with (
+            patch("hvcwatch.email_monitor.logger"),
+            patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
+            patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
+            patch("hvcwatch.email_monitor.extract_timeframe", return_value="monthly"),
+            patch(
+                "hvcwatch.email_monitor.should_alert", return_value=True
+            ) as mock_should,
+            patch("hvcwatch.email_monitor.record_alert") as mock_record,
+            patch("hvcwatch.email_monitor.notify_all_platforms"),
+        ):
+            process_email_message(msg)
+
+            # Should use the email's date, not today
+            expected_date = msg.date.date()
+            mock_should.assert_called_once_with("AAPL", "monthly", expected_date)
+            mock_record.assert_called_once_with("AAPL", "monthly", expected_date)
