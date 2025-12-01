@@ -22,7 +22,9 @@ class Settings(BaseSettings):
         None, description="Comma-separated Discord webhook URLs"
     )
 
-    polygon_api_key: str = Field(..., description="Polygon.io API key")
+    polygon_api_key: str | None = Field(
+        None, description="Polygon.io API key (no longer used)"
+    )
 
     hvcwatch_db_path: str | None = Field(
         None, description="Path to SQLite database for alert tracking"

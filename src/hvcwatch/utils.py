@@ -4,29 +4,11 @@ from datetime import date, datetime, timedelta
 from typing import Literal
 
 import pandas_market_calendars as mcal
-import polars as pl
 import pytz
 import structlog
-from polygon import RESTClient
-
-from hvcwatch.config import settings
 
 logging.basicConfig(level=logging.INFO)
 logger = structlog.get_logger()
-
-
-def format_number(num: float | int | None) -> str:
-    """Format large numbers with K, M, B suffixes"""
-    if num is None:
-        return "N/A"
-    if num >= 1_000_000_000:
-        return f"{num / 1_000_000_000:.1f}B"
-    elif num >= 1_000_000:
-        return f"{num / 1_000_000:.0f}M"
-    elif num >= 1_000:
-        return f"{num / 1_000:.0f}K"
-    else:
-        return str(int(num))
 
 
 def extract_tickers(subject: str) -> list[str]:
@@ -69,54 +51,6 @@ def extract_timeframe(subject: str) -> Literal["daily", "weekly", "monthly"]:
     elif "monthly" in subject_lower:
         return "monthly"
     return "daily"
-
-
-def get_ticker_logo(ticker: str) -> str:
-    logger.info("Fetching ticker logo", ticker=ticker)
-    return f"https://static.stocktitan.net/company-logo/{ticker.lower()}.webp"
-
-
-def get_ticker_details(ticker: str) -> dict:
-    logger.info("Fetching ticker details", ticker=ticker)
-    client = RESTClient(api_key=settings.polygon_api_key)
-    snapshot = client.get_ticker_details(ticker)
-
-    return {
-        "ticker": snapshot.ticker,  # type: ignore
-        "name": snapshot.name,  # type: ignore
-        "logo_url": get_ticker_logo(ticker),
-        "description": snapshot.description,  # type: ignore
-        "type": snapshot.type,  # type: ignore
-    }
-
-
-def get_ticker_stats(ticker: str) -> dict:
-    logger.info("Fetching quote for ticker", ticker=ticker)
-    client = RESTClient(api_key=settings.polygon_api_key)
-
-    start_date = date.today().strftime("%Y-%m-%d")
-    end_date = (date.today() - timedelta(days=30)).strftime("%Y-%m-%d")
-
-    aggs = []
-    for a in client.list_aggs(
-        ticker, 1, "day", end_date, start_date, adjusted=True, sort="asc"
-    ):
-        aggs.append(a)
-
-    df = (
-        pl.DataFrame([x for x in aggs])
-        .select("close", "volume")
-        .with_columns(pl.col("volume").rolling_mean(window_size=20).alias("volume_sma"))
-        .with_columns((pl.col("volume") / pl.col("volume_sma")).alias("volume_ratio"))
-    )
-
-    last_row = df[-1]
-    return {
-        "close": last_row["close"].item(),
-        "volume": last_row["volume"].item(),
-        "volume_sma": last_row["volume_sma"].item(),
-        "volume_ratio": last_row["volume_ratio"].item(),
-    }
 
 
 def _normalize_to_nyc_timezone(check_time: datetime) -> datetime:

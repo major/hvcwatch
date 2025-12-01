@@ -9,11 +9,9 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "structlog>=23.0.0",
     "pandas-market-calendars>=4.0.0",
-    "polygon-api-client>=1.0.0",
     "discord-webhook>=1.3.0",
     "pytz>=2023.0",
     "rich>=14.1.0",
-    "polars>=1.33.1",
     "imap-tools>=1.11.0",
     "pytest-env>=1.1.5",
     "sentry-sdk>=2.42.0",
@@ -56,7 +54,6 @@ env = [
     "FASTMAIL_USER=test_user",
     "FASTMAIL_PASS=test_password",
     "DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/test",
-    "POLYGON_API_KEY=test_api_key",
 ]
 
 [tool.pyright]

@@ -3,7 +3,6 @@
 import pytest
 from unittest.mock import Mock, patch
 
-from hvcwatch.models import TickerData
 from hvcwatch.notification import (
     DiscordNotifier,
     notify_all_platforms,
@@ -15,38 +14,6 @@ from hvcwatch.notification import (
 def mock_sentry():
     with patch("hvcwatch.notification.sentry_sdk"):
         yield
-
-
-@pytest.fixture
-def sample_ticker_data() -> TickerData:
-    """Create sample TickerData for testing."""
-    return TickerData(
-        ticker="AAPL",
-        name="Apple Inc.",
-        description="Technology company",
-        type="CS",
-        logo_url="https://static.stocktitan.net/company-logo/aapl.webp",
-        close=150.25,
-        volume=2_500_000,
-        volume_sma=2_000_000.0,
-        volume_ratio=1.25,
-    )
-
-
-@pytest.fixture
-def sample_ticker_data_no_sma() -> TickerData:
-    """Create sample TickerData with None volume_sma (insufficient data case)."""
-    return TickerData(
-        ticker="TSLA",
-        name="Tesla Inc",
-        description="Electric vehicle company",
-        type="CS",
-        logo_url="https://static.stocktitan.net/company-logo/tsla.webp",
-        close=250.50,
-        volume=500_000,
-        volume_sma=None,
-        volume_ratio=None,
-    )
 
 
 @pytest.fixture
@@ -78,120 +45,38 @@ def mock_discord_webhook():
         yield mock_webhook_class, mock_embed_class, mock_webhook, mock_embed
 
 
-class TestDiscordNotifierBuildDescription:
-    """Test DiscordNotifier build_description method."""
-
-    @pytest.mark.parametrize(
-        "ticker_data_kwargs,expected_parts",
-        [
-            (
-                {
-                    "ticker": "AAPL",
-                    "name": "Apple Inc",
-                    "description": "Tech",
-                    "type": "CS",
-                    "logo_url": "https://example.com/logo.png",
-                    "close": 150.25,
-                    "volume": 2_500_000,
-                    "volume_sma": 2_000_000.0,
-                    "volume_ratio": 1.25,
-                },
-                ["Current price: $150.25", "Volume vs avg: 2M / 2M **1.25x**"],
-            ),
-            (
-                {
-                    "ticker": "MSFT",
-                    "name": "Microsoft",
-                    "description": "Software",
-                    "type": "CS",
-                    "logo_url": "https://example.com/logo.png",
-                    "close": 99.99,
-                    "volume": 1_000_000,
-                    "volume_sma": 800_000.0,
-                    "volume_ratio": 1.25,
-                },
-                ["Current price: $99.99", "Volume vs avg: 1M / 800K **1.25x**"],
-            ),
-            (
-                {
-                    "ticker": "GOOGL",
-                    "name": "Alphabet",
-                    "description": "Search",
-                    "type": "CS",
-                    "logo_url": "https://example.com/logo.png",
-                    "close": 1000.00,
-                    "volume": 500_000,
-                    "volume_sma": 1_000_000.0,
-                    "volume_ratio": 0.50,
-                },
-                ["Current price: $1000.00", "Volume vs avg: 500K / 1M **0.50x**"],
-            ),
-        ],
-    )
-    def test_build_description_various_values(self, ticker_data_kwargs, expected_parts):
-        """✅ Test build_description with various ticker data values."""
-        ticker_data = TickerData(**ticker_data_kwargs)
-        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
-
-        result = notifier.build_description(ticker_data)
-
-        # Check that both expected parts are in the result
-        for part in expected_parts:
-            assert part in result
-
-        # Check that the result is properly formatted with newlines
-        lines = result.split("\n")
-        assert len(lines) == 2
-
-    def test_build_description_insufficient_data(
-        self, sample_ticker_data_no_sma: TickerData
-    ):
-        """✅ Test build_description when volume_sma is None (insufficient data)."""
-        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
-
-        result = notifier.build_description(sample_ticker_data_no_sma)
-
-        assert "Current price: $250.50" in result
-        assert "Volume: 500K (insufficient data for average)" in result
-        assert "**" not in result  # No bold ratio when insufficient data
-
-
 class TestDiscordNotifierSend:
     """Test DiscordNotifier send method."""
 
     @patch("hvcwatch.notification.logger")
-    def test_send_success(
+    def test_send_daily_alert(
         self,
         mock_logger,
-        sample_ticker_data: TickerData,
         mock_settings,
         mock_discord_webhook,
     ):
-        """✅ Test successful Discord notification send."""
+        """✅ Test sending a daily alert."""
         mock_webhook_class, mock_embed_class, mock_webhook, mock_embed = (
             mock_discord_webhook
         )
 
         webhook_url = "https://discord.com/api/webhooks/test"
         notifier = DiscordNotifier(webhook_url=webhook_url)
-        notifier.send(sample_ticker_data)
+        notifier.send("AAPL", "daily")
 
         # Verify webhook creation
         mock_webhook_class.assert_called_once_with(
             url=webhook_url, rate_limit_retry=True
         )
 
-        # Verify embed creation and configuration
+        # Verify embed creation - title is just the ticker
         mock_embed_class.assert_called_once_with(
-            title="Apple Inc. (AAPL)",
-            description=notifier.build_description(sample_ticker_data),
+            title="AAPL",
+            description="**Timeframe:** Daily",
             color="03b2f8",
         )
 
         # Verify embed methods were called
-        mock_embed.set_thumbnail.assert_called_once_with(
-            url="https://static.stocktitan.net/company-logo/aapl.webp"
-        )
         mock_embed.set_footer.assert_called_once_with(text="HVC Watch · Major's Bots")
         mock_embed.set_image.assert_called_once_with(url=mock_settings.transparent_png)
         mock_embed.set_timestamp.assert_called_once()
@@ -201,14 +86,58 @@ class TestDiscordNotifierSend:
         mock_webhook.execute.assert_called_once()
 
         # Verify logging
-        mock_logger.info.assert_any_call("Sending to Discord", ticker="AAPL")
+        mock_logger.info.assert_any_call(
+            "Sending to Discord", ticker="AAPL", timeframe="daily"
+        )
         mock_logger.info.assert_any_call("Discord response", status_code=200)
 
     @patch("hvcwatch.notification.logger")
-    @pytest.mark.parametrize("status_code", [200, 201, 204, 400, 500])
-    def test_send_various_response_codes(
-        self, mock_logger, sample_ticker_data, mock_settings, status_code
+    def test_send_weekly_alert(
+        self,
+        mock_logger,
+        mock_settings,
+        mock_discord_webhook,
     ):
+        """✅ Test sending a weekly alert."""
+        mock_webhook_class, mock_embed_class, mock_webhook, mock_embed = (
+            mock_discord_webhook
+        )
+
+        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
+        notifier.send("TSLA", "weekly")
+
+        # Verify embed has weekly timeframe (no emoji)
+        mock_embed_class.assert_called_once_with(
+            title="TSLA",
+            description="**Timeframe:** Weekly",
+            color="03b2f8",
+        )
+
+    @patch("hvcwatch.notification.logger")
+    def test_send_monthly_alert_with_fire_emoji(
+        self,
+        mock_logger,
+        mock_settings,
+        mock_discord_webhook,
+    ):
+        """✅ Test sending a monthly alert with 🔥 emoji."""
+        mock_webhook_class, mock_embed_class, mock_webhook, mock_embed = (
+            mock_discord_webhook
+        )
+
+        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
+        notifier.send("NVDA", "monthly")
+
+        # Verify embed has monthly timeframe WITH fire emoji
+        mock_embed_class.assert_called_once_with(
+            title="NVDA",
+            description="**Timeframe:** Monthly 🔥",
+            color="03b2f8",
+        )
+
+    @patch("hvcwatch.notification.logger")
+    @pytest.mark.parametrize("status_code", [200, 201, 204, 400, 500])
+    def test_send_various_response_codes(self, mock_logger, mock_settings, status_code):
         """✅ Test Discord notification with various HTTP response codes."""
         with (
             patch("hvcwatch.notification.DiscordWebhook") as mock_webhook_class,
@@ -225,89 +154,50 @@ class TestDiscordNotifierSend:
             notifier = DiscordNotifier(
                 webhook_url="https://discord.com/api/webhooks/test"
             )
-            notifier.send(sample_ticker_data)
+            notifier.send("AAPL", "daily")
 
             mock_logger.info.assert_any_call(
                 "Discord response", status_code=status_code
             )
 
     @patch("hvcwatch.notification.logger")
-    def test_send_with_different_ticker_data(
-        self, mock_logger, mock_settings, mock_discord_webhook
+    @pytest.mark.parametrize(
+        "ticker,timeframe",
+        [
+            ("AAPL", "daily"),
+            ("TSLA", "weekly"),
+            ("NVDA", "monthly"),
+            ("MSFT", "daily"),
+            ("GOOGL", "weekly"),
+        ],
+    )
+    def test_send_various_tickers_and_timeframes(
+        self, mock_logger, mock_settings, mock_discord_webhook, ticker, timeframe
     ):
-        """✅ Test Discord notification with different ticker data."""
+        """✅ Test Discord notification with various tickers and timeframes."""
         mock_webhook_class, mock_embed_class, mock_webhook, mock_embed = (
             mock_discord_webhook
         )
 
-        # Different ticker data
-        ticker_data = TickerData(
-            ticker="NVDA",
-            name="NVIDIA Corporation",
-            description="Graphics processors",
-            type="CS",
-            logo_url="https://static.stocktitan.net/company-logo/nvda.webp",
-            close=495.50,
-            volume=5_000_000,
-            volume_sma=4_000_000.0,
-            volume_ratio=1.25,
-        )
-
         notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
-        notifier.send(ticker_data)
+        notifier.send(ticker, timeframe)
 
-        # Verify embed was created with correct title
-        mock_embed_class.assert_called_once()
-        call_args = mock_embed_class.call_args[1]
-        assert call_args["title"] == "NVIDIA Corporation (NVDA)"
-
-        # Verify thumbnail was set with correct URL
-        mock_embed.set_thumbnail.assert_called_once_with(
-            url="https://static.stocktitan.net/company-logo/nvda.webp"
+        # Verify logging mentions correct ticker and timeframe
+        mock_logger.info.assert_any_call(
+            "Sending to Discord", ticker=ticker, timeframe=timeframe
         )
-
-        # Verify logging with correct ticker
-        mock_logger.info.assert_any_call("Sending to Discord", ticker="NVDA")
 
 
 class TestNotifyAllPlatforms:
     """Test notify_all_platforms orchestrator function."""
 
-    @pytest.fixture
-    def mock_ticker_functions(self):
-        """Mock get_ticker_details and get_ticker_stats."""
-        mock_details = {
-            "ticker": "AAPL",
-            "name": "Apple Inc.",
-            "description": "Technology company",
-            "type": "CS",
-            "logo_url": "https://static.stocktitan.net/company-logo/aapl.webp",
-        }
-
-        mock_stats = {
-            "close": 150.25,
-            "volume": 2_500_000,
-            "volume_sma": 2_000_000.0,
-            "volume_ratio": 1.25,
-        }
-
-        with (
-            patch("hvcwatch.notification.get_ticker_details") as mock_get_details,
-            patch("hvcwatch.notification.get_ticker_stats") as mock_get_stats,
-        ):
-            mock_get_details.return_value = mock_details
-            mock_get_stats.return_value = mock_stats
-            yield mock_get_details, mock_get_stats
-
     @patch("hvcwatch.notification.settings")
     @patch("hvcwatch.notification.logger")
     @patch("hvcwatch.notification.DiscordNotifier")
     def test_notify_all_platforms_success(
-        self, mock_notifier_class, mock_logger, mock_settings, mock_ticker_functions
+        self, mock_notifier_class, mock_logger, mock_settings
     ):
         """✅ Test successful notification to all platforms."""
-        mock_get_details, mock_get_stats = mock_ticker_functions
-
         # Mock settings to return a single webhook URL
         mock_settings.get_discord_webhook_urls.return_value = [
             "https://discord.com/api/webhooks/test"
@@ -316,50 +206,79 @@ class TestNotifyAllPlatforms:
         mock_notifier = Mock()
         mock_notifier_class.return_value = mock_notifier
 
-        notify_all_platforms("AAPL")
-
-        # Verify ticker data was fetched
-        mock_get_details.assert_called_once_with("AAPL")
-        mock_get_stats.assert_called_once_with("AAPL")
+        notify_all_platforms("AAPL", "daily")
 
         # Verify Discord notifier was created and called
         mock_notifier_class.assert_called_once_with(
             webhook_url="https://discord.com/api/webhooks/test"
         )
-        mock_notifier.send.assert_called_once()
-
-        # Verify the TickerData passed to send() has correct fields
-        call_args = mock_notifier.send.call_args[0]
-        ticker_data = call_args[0]
-        assert ticker_data.ticker == "AAPL"
-        assert ticker_data.name == "Apple Inc."
-        assert ticker_data.price == 150.25
-        assert ticker_data.volume == 2_500_000
+        mock_notifier.send.assert_called_once_with("AAPL", "daily")
 
         # Verify logging
         mock_logger.info.assert_any_call(
-            "Fetching ticker data for notifications", ticker="AAPL"
+            "Sending notifications", ticker="AAPL", timeframe="daily"
         )
 
+    @patch("hvcwatch.notification.settings")
     @patch("hvcwatch.notification.logger")
-    @patch("hvcwatch.notification.get_ticker_details")
-    def test_notify_all_platforms_fetch_error(self, mock_get_details, mock_logger):
-        """❌ Test error handling when fetching ticker data fails."""
-        mock_get_details.side_effect = Exception("API error")
+    @patch("hvcwatch.notification.DiscordNotifier")
+    def test_notify_all_platforms_with_timeframe(
+        self, mock_notifier_class, mock_logger, mock_settings
+    ):
+        """✅ Test notification with different timeframes."""
+        mock_settings.get_discord_webhook_urls.return_value = [
+            "https://discord.com/api/webhooks/test"
+        ]
 
-        notify_all_platforms("INVALID")
+        mock_notifier = Mock()
+        mock_notifier_class.return_value = mock_notifier
 
-        # Verify error was logged
-        mock_logger.error.assert_called_once()
-        error_call = mock_logger.error.call_args
-        assert error_call[1]["ticker"] == "INVALID"
-        assert "API error" in error_call[1]["error"]
+        notify_all_platforms("TSLA", "weekly")
+
+        mock_notifier.send.assert_called_once_with("TSLA", "weekly")
+
+    @patch("hvcwatch.notification.settings")
+    @patch("hvcwatch.notification.logger")
+    @patch("hvcwatch.notification.DiscordNotifier")
+    def test_notify_all_platforms_monthly_with_fire(
+        self, mock_notifier_class, mock_logger, mock_settings
+    ):
+        """✅ Test monthly notification passes correct timeframe."""
+        mock_settings.get_discord_webhook_urls.return_value = [
+            "https://discord.com/api/webhooks/test"
+        ]
+
+        mock_notifier = Mock()
+        mock_notifier_class.return_value = mock_notifier
+
+        notify_all_platforms("NVDA", "monthly")
+
+        mock_notifier.send.assert_called_once_with("NVDA", "monthly")
+
+    @patch("hvcwatch.notification.settings")
+    @patch("hvcwatch.notification.logger")
+    @patch("hvcwatch.notification.DiscordNotifier")
+    def test_notify_all_platforms_default_timeframe(
+        self, mock_notifier_class, mock_logger, mock_settings
+    ):
+        """✅ Test that default timeframe is 'daily'."""
+        mock_settings.get_discord_webhook_urls.return_value = [
+            "https://discord.com/api/webhooks/test"
+        ]
+
+        mock_notifier = Mock()
+        mock_notifier_class.return_value = mock_notifier
+
+        # Call without timeframe argument
+        notify_all_platforms("AAPL")
+
+        mock_notifier.send.assert_called_once_with("AAPL", "daily")
 
     @patch("hvcwatch.notification.settings")
     @patch("hvcwatch.notification.logger")
     @patch("hvcwatch.notification.DiscordNotifier")
     def test_notify_all_platforms_send_error(
-        self, mock_notifier_class, mock_logger, mock_settings, mock_ticker_functions
+        self, mock_notifier_class, mock_logger, mock_settings
     ):
         """❌ Test error handling when sending notification fails."""
         # Mock settings to return a single webhook URL
@@ -371,7 +290,7 @@ class TestNotifyAllPlatforms:
         mock_notifier.send.side_effect = Exception("Webhook error")
         mock_notifier_class.return_value = mock_notifier
 
-        notify_all_platforms("AAPL")
+        notify_all_platforms("AAPL", "daily")
 
         # Verify error was logged
         error_calls = [call for call in mock_logger.error.call_args_list]
@@ -389,61 +308,34 @@ class TestNotifyAllPlatforms:
         self, mock_notifier_class, mock_logger, mock_settings, ticker
     ):
         """✅ Test notify_all_platforms with various ticker symbols."""
-        mock_details = {
-            "ticker": ticker,
-            "name": f"{ticker} Corporation",
-            "description": "Test company",
-            "type": "CS",
-            "logo_url": f"https://example.com/{ticker.lower()}.png",
-        }
-
-        mock_stats = {
-            "close": 100.0,
-            "volume": 1_000_000,
-            "volume_sma": 900_000.0,
-            "volume_ratio": 1.11,
-        }
-
         # Mock settings to return a single webhook URL
         mock_settings.get_discord_webhook_urls.return_value = [
             "https://discord.com/api/webhooks/test"
         ]
 
-        with (
-            patch("hvcwatch.notification.get_ticker_details") as mock_get_details,
-            patch("hvcwatch.notification.get_ticker_stats") as mock_get_stats,
-        ):
-            mock_get_details.return_value = mock_details
-            mock_get_stats.return_value = mock_stats
+        mock_notifier = Mock()
+        mock_notifier_class.return_value = mock_notifier
 
-            mock_notifier = Mock()
-            mock_notifier_class.return_value = mock_notifier
+        notify_all_platforms(ticker, "daily")
 
-            notify_all_platforms(ticker)
+        # Verify notification was sent with correct ticker
+        mock_notifier.send.assert_called_once_with(ticker, "daily")
 
-            # Verify fetching with correct ticker
-            mock_get_details.assert_called_once_with(ticker)
-            mock_get_stats.assert_called_once_with(ticker)
-
-            # Verify notification was sent
-            mock_notifier.send.assert_called_once()
-
-            # Verify logging mentions correct ticker
-            mock_logger.info.assert_any_call(
-                "Fetching ticker data for notifications", ticker=ticker
-            )
+        # Verify logging mentions correct ticker
+        mock_logger.info.assert_any_call(
+            "Sending notifications", ticker=ticker, timeframe="daily"
+        )
 
     @patch("hvcwatch.notification.settings")
     @patch("hvcwatch.notification.logger")
     @patch("hvcwatch.notification.DiscordNotifier")
     def test_notify_all_platforms_no_discord_config(
-        self, mock_notifier_class, mock_logger, mock_settings, mock_ticker_functions
+        self, mock_notifier_class, mock_logger, mock_settings
     ):
         """⚠️ Test graceful handling when Discord is not configured."""
-        mock_get_details, mock_get_stats = mock_ticker_functions
         mock_settings.get_discord_webhook_urls.return_value = []  # No Discord configured
 
-        notify_all_platforms("AAPL")
+        notify_all_platforms("AAPL", "daily")
 
         # Verify Discord notifier was NOT created
         mock_notifier_class.assert_not_called()
@@ -458,3 +350,28 @@ class TestNotifyAllPlatforms:
             "No notifications sent - no Discord webhooks configured",
             ticker="AAPL",
         )
+
+    @patch("hvcwatch.notification.settings")
+    @patch("hvcwatch.notification.logger")
+    @patch("hvcwatch.notification.DiscordNotifier")
+    def test_notify_all_platforms_multiple_webhooks(
+        self, mock_notifier_class, mock_logger, mock_settings
+    ):
+        """✅ Test sending to multiple webhook URLs."""
+        mock_settings.get_discord_webhook_urls.return_value = [
+            "https://discord.com/api/webhooks/test1",
+            "https://discord.com/api/webhooks/test2",
+        ]
+
+        mock_notifier = Mock()
+        mock_notifier_class.return_value = mock_notifier
+
+        notify_all_platforms("AAPL", "weekly")
+
+        # Verify notifier was created twice (once per webhook)
+        assert mock_notifier_class.call_count == 2
+        assert mock_notifier.send.call_count == 2
+
+        # Both calls should have same ticker and timeframe
+        for call in mock_notifier.send.call_args_list:
+            assert call[0] == ("AAPL", "weekly")

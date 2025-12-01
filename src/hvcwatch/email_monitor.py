@@ -164,7 +164,7 @@ def process_email_message(msg: MailMessage) -> None:
 
     for ticker in tickers:
         if should_alert(ticker, timeframe, alert_date):
-            notify_all_platforms(ticker)
+            notify_all_platforms(ticker, timeframe)
             record_alert(ticker, timeframe, alert_date)
             logger.info("Alert sent", ticker=ticker, timeframe=timeframe)
         else:

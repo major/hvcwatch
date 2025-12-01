@@ -151,7 +151,7 @@ def test_process_email_message_behavior(subject, date, market_hours, expected_no
             mock_logger.info.assert_any_call("Email arrived outside market hours")
             mock_notify.assert_not_called()
         else:
-            mock_notify.assert_called_once_with("AAPL")
+            mock_notify.assert_called_once_with("AAPL", "daily")
 
 
 class TestDeduplication:
@@ -177,7 +177,7 @@ class TestDeduplication:
             process_email_message(msg)
 
             mock_should.assert_called_once_with("AAPL", "weekly", msg.date.date())
-            mock_notify.assert_called_once_with("AAPL")
+            mock_notify.assert_called_once_with("AAPL", "weekly")
             mock_record.assert_called_once_with("AAPL", "weekly", msg.date.date())
 
     def test_duplicate_alert_suppressed(self):
@@ -230,8 +230,8 @@ class TestDeduplication:
 
             # Only MSFT and NVDA should send
             assert mock_notify.call_count == 2
-            mock_notify.assert_any_call("MSFT")
-            mock_notify.assert_any_call("NVDA")
+            mock_notify.assert_any_call("MSFT", "weekly")
+            mock_notify.assert_any_call("NVDA", "weekly")
 
             # Only MSFT and NVDA should be recorded
             assert mock_record.call_count == 2
@@ -256,7 +256,7 @@ class TestDeduplication:
             process_email_message(msg)
 
             mock_should.assert_called_once_with("AAPL", "daily", msg.date.date())
-            mock_notify.assert_called_once_with("AAPL")
+            mock_notify.assert_called_once_with("AAPL", "daily")
             mock_record.assert_called_once()
 
     def test_uses_email_date_for_alert_date(self):
