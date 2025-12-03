@@ -85,6 +85,8 @@ class DiscordNotifier:
             description=description,
             color="03b2f8",
         )
+        logo_url = f"https://static.stocktitan.net/company-logo/{ticker.lower()}.webp"
+        embed.set_thumbnail(url=logo_url)
         embed.set_footer(text="HVC Watch · Major's Bots")
         embed.set_image(url=settings.transparent_png)
         embed.set_timestamp()
