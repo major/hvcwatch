@@ -1,11 +1,55 @@
+import json
 import re
 from datetime import date, datetime, timedelta
+from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 import pandas_market_calendars as mcal
 import pytz
 
 from hvcwatch.logging import logger
+
+# Path to SEC company tickers data file
+SEC_DATA_PATH = Path(__file__).parent.parent.parent / "data" / "company_tickers.json"
+
+
+@lru_cache(maxsize=1)
+def _load_sec_ticker_lookup() -> dict[str, str]:
+    """
+    Load SEC company tickers data and build ticker->name lookup.
+
+    Returns a dict mapping ticker symbols to company names.
+    Uses LRU cache to avoid reloading the file on every lookup.
+    """
+    if not SEC_DATA_PATH.exists():
+        logger.warning("SEC data file not found path={path}", path=SEC_DATA_PATH)
+        return {}
+
+    try:
+        with open(SEC_DATA_PATH) as f:
+            data = json.load(f)
+        # Build ticker -> title lookup
+        lookup = {entry["ticker"]: entry["title"] for entry in data.values()}
+        logger.info("Loaded SEC ticker data entries={count}", count=len(lookup))
+        return lookup
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.error("Failed to parse SEC data error={error}", error=str(e))
+        return {}
+
+
+def get_company_name(ticker: str) -> str | None:
+    """
+    Look up company name for a ticker symbol using SEC data.
+
+    Args:
+        ticker: Stock ticker symbol (e.g., "AAPL")
+
+    Returns:
+        Company name if found (e.g., "Apple Inc."), None otherwise
+    """
+    lookup = _load_sec_ticker_lookup()
+    return lookup.get(ticker.upper())
 
 
 def extract_tickers(subject: str) -> list[str]:

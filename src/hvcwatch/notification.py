@@ -5,6 +5,7 @@ from discord_webhook import DiscordEmbed, DiscordWebhook
 
 from hvcwatch.config import settings
 from hvcwatch.logging import logger
+from hvcwatch.utils import get_company_name
 
 # Type alias for timeframe
 Timeframe = Literal["daily", "weekly", "monthly"]
@@ -76,9 +77,16 @@ class DiscordNotifier:
             rate_limit_retry=True,
         )
 
+        # Look up company name
+        company_name = get_company_name(ticker)
+
         # Add 🔥 emoji for monthly alerts
         emoji = " 🔥" if timeframe == "monthly" else ""
-        description = f"**Timeframe:** {timeframe.capitalize()}{emoji}"
+        description_parts = []
+        if company_name:
+            description_parts.append(f"**{company_name}**")
+        description_parts.append(f"**Timeframe:** {timeframe.capitalize()}{emoji}")
+        description = "\n".join(description_parts)
 
         embed = DiscordEmbed(
             title=ticker,

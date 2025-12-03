@@ -16,6 +16,24 @@ def mock_sentry():
         yield
 
 
+# Mock get_company_name to return known values for test tickers
+@pytest.fixture(autouse=True)
+def mock_company_names():
+    company_names = {
+        "AAPL": "Apple Inc.",
+        "TSLA": "Tesla, Inc.",
+        "NVDA": "NVIDIA CORP",
+        "MSFT": "MICROSOFT CORP",
+        "GOOGL": "Alphabet Inc.",
+        "AMZN": "AMAZON COM INC",
+    }
+    with patch(
+        "hvcwatch.notification.get_company_name",
+        side_effect=lambda t: company_names.get(t.upper()),
+    ):
+        yield
+
+
 @pytest.fixture
 def mock_settings():
     """Mock settings with Discord webhook URL and transparent PNG."""
@@ -67,10 +85,10 @@ class TestDiscordNotifierSend:
             url=webhook_url, rate_limit_retry=True
         )
 
-        # Verify embed creation - title is just the ticker
+        # Verify embed creation - title is ticker, description includes company name
         mock_embed_class.assert_called_once_with(
             title="AAPL",
-            description="**Timeframe:** Daily",
+            description="**Apple Inc.**\n**Timeframe:** Daily",
             color="03b2f8",
         )
 
@@ -96,10 +114,10 @@ class TestDiscordNotifierSend:
         notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
         notifier.send("TSLA", "weekly")
 
-        # Verify embed has weekly timeframe (no emoji)
+        # Verify embed has weekly timeframe with company name (no emoji)
         mock_embed_class.assert_called_once_with(
             title="TSLA",
-            description="**Timeframe:** Weekly",
+            description="**Tesla, Inc.**\n**Timeframe:** Weekly",
             color="03b2f8",
         )
 
@@ -116,10 +134,10 @@ class TestDiscordNotifierSend:
         notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
         notifier.send("NVDA", "monthly")
 
-        # Verify embed has monthly timeframe WITH fire emoji
+        # Verify embed has monthly timeframe with company name and fire emoji
         mock_embed_class.assert_called_once_with(
             title="NVDA",
-            description="**Timeframe:** Monthly 🔥",
+            description="**NVIDIA CORP**\n**Timeframe:** Monthly 🔥",
             color="03b2f8",
         )
 

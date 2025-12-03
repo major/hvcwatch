@@ -7,7 +7,9 @@ import pandas as pd
 from hvcwatch.utils import (
     extract_tickers,
     extract_timeframe,
+    get_company_name,
     is_market_hours_or_near,
+    _load_sec_ticker_lookup,
 )
 
 
@@ -250,3 +252,74 @@ class TestIsMarketHoursOrNear:
         result = is_market_hours_or_near(test_time, hours=hours)
         # Should be True if within buffer, but depends on actual hours value
         assert isinstance(result, bool)
+
+
+class TestGetCompanyName:
+    """Test cases for get_company_name function."""
+
+    @pytest.fixture(autouse=True)
+    def clear_cache(self):
+        """Clear the LRU cache before each test."""
+        _load_sec_ticker_lookup.cache_clear()
+        yield
+        _load_sec_ticker_lookup.cache_clear()
+
+    def test_get_company_name_found(self, tmp_path):
+        """Test getting company name for known ticker."""
+        # Create mock SEC data file
+        sec_data = {
+            "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+            "1": {"cik_str": 789019, "ticker": "MSFT", "title": "MICROSOFT CORP"},
+        }
+        data_file = tmp_path / "company_tickers.json"
+        import json
+
+        data_file.write_text(json.dumps(sec_data))
+
+        with patch("hvcwatch.utils.SEC_DATA_PATH", data_file):
+            assert get_company_name("AAPL") == "Apple Inc."
+            assert get_company_name("MSFT") == "MICROSOFT CORP"
+
+    def test_get_company_name_not_found(self, tmp_path):
+        """Test getting company name for unknown ticker."""
+        sec_data = {
+            "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+        }
+        data_file = tmp_path / "company_tickers.json"
+        import json
+
+        data_file.write_text(json.dumps(sec_data))
+
+        with patch("hvcwatch.utils.SEC_DATA_PATH", data_file):
+            assert get_company_name("FAKE") is None
+            assert get_company_name("NOTREAL") is None
+
+    def test_get_company_name_case_insensitive(self, tmp_path):
+        """Test that ticker lookup is case insensitive."""
+        sec_data = {
+            "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+        }
+        data_file = tmp_path / "company_tickers.json"
+        import json
+
+        data_file.write_text(json.dumps(sec_data))
+
+        with patch("hvcwatch.utils.SEC_DATA_PATH", data_file):
+            assert get_company_name("aapl") == "Apple Inc."
+            assert get_company_name("Aapl") == "Apple Inc."
+            assert get_company_name("AAPL") == "Apple Inc."
+
+    def test_get_company_name_missing_file(self, tmp_path):
+        """Test graceful handling when SEC data file is missing."""
+        missing_file = tmp_path / "nonexistent.json"
+
+        with patch("hvcwatch.utils.SEC_DATA_PATH", missing_file):
+            assert get_company_name("AAPL") is None
+
+    def test_get_company_name_invalid_json(self, tmp_path):
+        """Test graceful handling when SEC data file has invalid JSON."""
+        data_file = tmp_path / "company_tickers.json"
+        data_file.write_text("not valid json")
+
+        with patch("hvcwatch.utils.SEC_DATA_PATH", data_file):
+            assert get_company_name("AAPL") is None
