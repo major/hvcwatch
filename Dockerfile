@@ -1,4 +1,4 @@
-FROM docker.io/library/python:3.14-slim@sha256:2751cbe93751f0147bc1584be957c6dd4c5f977c3d4e0396b56456a9fd4ed137
+FROM docker.io/library/python:3.14-slim@sha256:aa5be1196770ff8c5896e3da0848332cd73663a99a69fc7a2b6772e53111793c
 COPY --from=ghcr.io/astral-sh/uv:latest@sha256:81f1a183fbdd9cec1498b066a32f0da043d4a9dda12b8372c7bfd183665e485d /uv /uvx /bin/
 
 # Capture git commit info at build time
