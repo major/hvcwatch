@@ -3,12 +3,12 @@ import re
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
 
 import pandas_market_calendars as mcal
 import pytz
 
 from hvcwatch.logging import logger
+from hvcwatch.types import Timeframe
 
 # Path to SEC company tickers data file
 SEC_DATA_PATH = Path(__file__).parent.parent.parent / "data" / "company_tickers.json"
@@ -69,7 +69,7 @@ def extract_tickers(subject: str) -> list[str]:
         return []
 
 
-def extract_timeframe(subject: str) -> Literal["daily", "weekly", "monthly"]:
+def extract_timeframe(subject: str) -> Timeframe:
     """
     Extract HVC timeframe from email subject.
 

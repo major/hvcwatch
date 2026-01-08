@@ -7,12 +7,10 @@ when alerts were last sent for each ticker.
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Literal
 
 from hvcwatch.config import settings
 from hvcwatch.logging import logger
-
-TimeframeType = Literal["daily", "weekly", "monthly"]
+from hvcwatch.types import Timeframe
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS hvc_alerts (
@@ -52,7 +50,7 @@ def _get_week_monday(d: date) -> date:
     return d - timedelta(days=d.weekday())
 
 
-def should_alert(ticker: str, timeframe: TimeframeType, alert_date: date) -> bool:
+def should_alert(ticker: str, timeframe: Timeframe, alert_date: date) -> bool:
     """
     Check if alert should be sent for this ticker/timeframe combination.
 
@@ -126,7 +124,7 @@ def should_alert(ticker: str, timeframe: TimeframeType, alert_date: date) -> boo
         conn.close()
 
 
-def record_alert(ticker: str, timeframe: TimeframeType, alert_date: date) -> None:
+def record_alert(ticker: str, timeframe: Timeframe, alert_date: date) -> None:
     """
     Record that an alert was sent for tracking purposes.
 

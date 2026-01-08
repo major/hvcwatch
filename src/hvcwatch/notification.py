@@ -1,14 +1,12 @@
-from typing import Literal, Protocol
+from typing import Protocol
 
 import sentry_sdk
 from discord_webhook import DiscordEmbed, DiscordWebhook
 
 from hvcwatch.config import settings
 from hvcwatch.logging import logger
+from hvcwatch.types import Timeframe
 from hvcwatch.utils import get_company_name
-
-# Type alias for timeframe
-Timeframe = Literal["daily", "weekly", "monthly"]
 
 
 class NotificationProvider(Protocol):
