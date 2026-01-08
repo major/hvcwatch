@@ -3,9 +3,9 @@ import re
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas_market_calendars as mcal
-import pytz
 
 from hvcwatch.logging import logger
 from hvcwatch.types import Timeframe
@@ -96,11 +96,11 @@ def extract_timeframe(subject: str) -> Timeframe:
 
 def _normalize_to_nyc_timezone(check_time: datetime) -> datetime:
     """Convert a datetime to NYC timezone, handling both naive and timezone-aware datetimes."""
-    nyc_tz = pytz.timezone("America/New_York")
+    nyc_tz = ZoneInfo("America/New_York")
 
     if check_time.tzinfo is None:
         # If naive datetime, assume it's in NYC timezone
-        return nyc_tz.localize(check_time)
+        return check_time.replace(tzinfo=nyc_tz)
     else:
         # Convert to NYC timezone
         return check_time.astimezone(nyc_tz)

@@ -129,7 +129,6 @@ dependencies = [
     { name = "pandas-market-calendars" },
     { name = "pydantic-settings" },
     { name = "pytest-env" },
-    { name = "pytz" },
     { name = "rich" },
     { name = "sentry-sdk" },
 ]
@@ -152,7 +151,6 @@ requires-dist = [
     { name = "pandas-market-calendars", specifier = ">=4.0.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
     { name = "pytest-env", specifier = ">=1.1.5" },
-    { name = "pytz", specifier = ">=2023.0" },
     { name = "rich", specifier = ">=14.1.0" },
     { name = "sentry-sdk", specifier = ">=2.42.0" },
 ]

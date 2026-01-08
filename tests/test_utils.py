@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import Mock, patch
-from datetime import datetime
-import pytz
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import pandas as pd
 
 from hvcwatch.utils import (
@@ -16,19 +16,19 @@ from hvcwatch.utils import (
 @pytest.fixture
 def nyc_timezone():
     """NYC timezone fixture."""
-    return pytz.timezone("America/New_York")
+    return ZoneInfo("America/New_York")
 
 
 @pytest.fixture
 def market_schedule_open():
     """Mock market schedule for an open market day."""
-    nyc_tz = pytz.timezone("America/New_York")
+    nyc_tz = ZoneInfo("America/New_York")
     today = datetime.now(nyc_tz).date()
-    market_open = nyc_tz.localize(
-        datetime.combine(today, datetime.min.time().replace(hour=9, minute=30))
+    market_open = datetime.combine(
+        today, datetime.min.time().replace(hour=9, minute=30), tzinfo=nyc_tz
     )
-    market_close = nyc_tz.localize(
-        datetime.combine(today, datetime.min.time().replace(hour=16, minute=0))
+    market_close = datetime.combine(
+        today, datetime.min.time().replace(hour=16, minute=0), tzinfo=nyc_tz
     )
 
     schedule = pd.DataFrame({
@@ -121,8 +121,10 @@ class TestIsMarketHoursOrNear:
 
         # Test time during market hours (2:00 PM NYC time)
         market_day = datetime.now(nyc_timezone).date()
-        test_time = nyc_timezone.localize(
-            datetime.combine(market_day, datetime.min.time().replace(hour=14, minute=0))
+        test_time = datetime.combine(
+            market_day,
+            datetime.min.time().replace(hour=14, minute=0),
+            tzinfo=nyc_timezone,
         )
 
         result = is_market_hours_or_near(test_time)
@@ -136,8 +138,10 @@ class TestIsMarketHoursOrNear:
 
         # Test time 2 hours before market open (7:30 AM NYC time)
         market_day = datetime.now(nyc_timezone).date()
-        test_time = nyc_timezone.localize(
-            datetime.combine(market_day, datetime.min.time().replace(hour=7, minute=30))
+        test_time = datetime.combine(
+            market_day,
+            datetime.min.time().replace(hour=7, minute=30),
+            tzinfo=nyc_timezone,
         )
 
         result = is_market_hours_or_near(test_time, hours=3)
@@ -151,8 +155,10 @@ class TestIsMarketHoursOrNear:
 
         # Test time 2 hours after market close (6:00 PM NYC time)
         market_day = datetime.now(nyc_timezone).date()
-        test_time = nyc_timezone.localize(
-            datetime.combine(market_day, datetime.min.time().replace(hour=18, minute=0))
+        test_time = datetime.combine(
+            market_day,
+            datetime.min.time().replace(hour=18, minute=0),
+            tzinfo=nyc_timezone,
         )
 
         result = is_market_hours_or_near(test_time, hours=3)
@@ -166,8 +172,10 @@ class TestIsMarketHoursOrNear:
 
         # Test time 5 hours before market open (4:30 AM NYC time)
         market_day = datetime.now(nyc_timezone).date()
-        test_time = nyc_timezone.localize(
-            datetime.combine(market_day, datetime.min.time().replace(hour=4, minute=30))
+        test_time = datetime.combine(
+            market_day,
+            datetime.min.time().replace(hour=4, minute=30),
+            tzinfo=nyc_timezone,
         )
 
         result = is_market_hours_or_near(test_time, hours=3)
@@ -181,8 +189,10 @@ class TestIsMarketHoursOrNear:
 
         # Test time 5 hours after market close (9:00 PM NYC time)
         market_day = datetime.now(nyc_timezone).date()
-        test_time = nyc_timezone.localize(
-            datetime.combine(market_day, datetime.min.time().replace(hour=21, minute=0))
+        test_time = datetime.combine(
+            market_day,
+            datetime.min.time().replace(hour=21, minute=0),
+            tzinfo=nyc_timezone,
         )
 
         result = is_market_hours_or_near(test_time, hours=3)
@@ -214,11 +224,12 @@ class TestIsMarketHoursOrNear:
         mock_market_calendar.schedule.return_value = market_schedule_open
 
         # UTC time that corresponds to market hours in NYC
-        utc_tz = pytz.UTC
-        market_day = datetime.now(utc_tz).date()
+        market_day = datetime.now(timezone.utc).date()
         # 7:00 PM UTC = 2:00 PM EST (during market hours)
-        test_time = utc_tz.localize(
-            datetime.combine(market_day, datetime.min.time().replace(hour=19, minute=0))
+        test_time = datetime.combine(
+            market_day,
+            datetime.min.time().replace(hour=19, minute=0),
+            tzinfo=timezone.utc,
         )
 
         result = is_market_hours_or_near(test_time)
@@ -243,10 +254,10 @@ class TestIsMarketHoursOrNear:
         market_day = datetime.now(nyc_timezone).date()
         # Use a safe hour calculation that won't exceed 23
         safe_hour = min(16 + min(hours, 7), 23)
-        test_time = nyc_timezone.localize(
-            datetime.combine(
-                market_day, datetime.min.time().replace(hour=safe_hour, minute=30)
-            )
+        test_time = datetime.combine(
+            market_day,
+            datetime.min.time().replace(hour=safe_hour, minute=30),
+            tzinfo=nyc_timezone,
         )
 
         result = is_market_hours_or_near(test_time, hours=hours)
