@@ -5,6 +5,7 @@ when alerts were last sent for each ticker.
 """
 
 import sqlite3
+from contextlib import closing
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -70,8 +71,7 @@ def should_alert(ticker: str, timeframe: Timeframe, alert_date: date) -> bool:
     if timeframe == "daily":
         return True
 
-    conn = _get_connection()
-    try:
+    with closing(_get_connection()) as conn:
         cursor = conn.execute(
             "SELECT alert_date FROM hvc_alerts WHERE ticker = ? AND timeframe = ? ORDER BY alert_date DESC LIMIT 1",
             (ticker.upper(), timeframe),
@@ -104,7 +104,7 @@ def should_alert(ticker: str, timeframe: Timeframe, alert_date: date) -> bool:
             )
             return should_send
 
-        elif timeframe == "monthly":
+        if timeframe == "monthly":
             # Compare (year, month) tuples
             should_send = (last_alert_date.year, last_alert_date.month) != (
                 alert_date.year,
@@ -120,8 +120,6 @@ def should_alert(ticker: str, timeframe: Timeframe, alert_date: date) -> bool:
             return should_send
 
         return True  # Fallback for unknown timeframes
-    finally:
-        conn.close()
 
 
 def record_alert(ticker: str, timeframe: Timeframe, alert_date: date) -> None:
@@ -137,8 +135,7 @@ def record_alert(ticker: str, timeframe: Timeframe, alert_date: date) -> None:
         # Don't track daily alerts - they're not deduplicated
         return
 
-    conn = _get_connection()
-    try:
+    with closing(_get_connection()) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO hvc_alerts (ticker, timeframe, alert_date) VALUES (?, ?, ?)",
             (ticker.upper(), timeframe, alert_date.isoformat()),
@@ -150,5 +147,3 @@ def record_alert(ticker: str, timeframe: Timeframe, alert_date: date) -> None:
             timeframe=timeframe,
             alert_date=str(alert_date),
         )
-    finally:
-        conn.close()
