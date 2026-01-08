@@ -5,13 +5,13 @@ import json
 import sys
 import urllib.error
 import urllib.request
-from pathlib import Path
+
+from hvcwatch.utils import SEC_DATA_PATH
 
 
 def main() -> int:
     """Download and save SEC company tickers JSON data."""
-    output_path = Path(__file__).parent.parent.parent / "data" / "company_tickers.json"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    SEC_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     url = "https://www.sec.gov/files/company_tickers.json"
     headers = {
@@ -37,10 +37,10 @@ def main() -> int:
             print(f"Downloaded {len(data):,} bytes with {len(tickers):,} companies")
 
             # Save to file
-            with open(output_path, "wb") as f:
+            with open(SEC_DATA_PATH, "wb") as f:
                 f.write(data)
 
-            print(f"Saved to {output_path}")
+            print(f"Saved to {SEC_DATA_PATH}")
             return 0
 
     except urllib.error.HTTPError as e:
