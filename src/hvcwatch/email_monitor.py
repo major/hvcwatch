@@ -5,10 +5,30 @@ from imap_tools.mailbox import BaseMailBox, MailBox
 from imap_tools.message import MailMessage
 from imap_tools.query import AND, A
 
+from hvcwatch.config import settings
 from hvcwatch.db import record_alert, should_alert
 from hvcwatch.logging import logger
-from hvcwatch.notification import notify_all_platforms
+from hvcwatch.notification import Timeframe, notify_all_platforms
 from hvcwatch.utils import extract_tickers, extract_timeframe, is_market_hours_or_near
+
+
+def is_timeframe_enabled(timeframe: Timeframe) -> bool:
+    """
+    Check if a given HVC timeframe is enabled in configuration.
+
+    Args:
+        timeframe: The alert timeframe to check ("daily", "weekly", or "monthly")
+
+    Returns:
+        True if the timeframe is enabled, False otherwise
+    """
+    match timeframe:
+        case "daily":
+            return settings.hvc_daily_enabled
+        case "weekly":
+            return settings.hvc_weekly_enabled
+        case "monthly":
+            return settings.hvc_monthly_enabled
 
 
 def connect_imap(host: str, user: str, password: str, folder: str) -> None:
@@ -157,6 +177,18 @@ def process_email_message(msg: MailMessage) -> None:
         level="info",
         data={"tickers": tickers, "timeframe": timeframe},
     )
+
+    if not is_timeframe_enabled(timeframe):
+        logger.info(
+            "Timeframe disabled in config timeframe={timeframe}",
+            timeframe=timeframe,
+        )
+        sentry_sdk.add_breadcrumb(
+            category="email",
+            message=f"Alert skipped - {timeframe} timeframe disabled",
+            level="info",
+        )
+        return
 
     for ticker in tickers:
         if should_alert(ticker, timeframe, alert_date):

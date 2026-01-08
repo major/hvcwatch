@@ -6,6 +6,7 @@ import pytest
 from hvcwatch.email_monitor import (
     connect_imap,
     get_unread_messages,
+    is_timeframe_enabled,
     monitor_mailbox,
     process_email_message,
 )
@@ -129,6 +130,7 @@ def test_process_email_message_behavior(subject, date, market_hours, expected_no
         ),
         patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
         patch("hvcwatch.email_monitor.extract_timeframe", return_value="daily"),
+        patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
         patch("hvcwatch.email_monitor.should_alert", return_value=True),
         patch("hvcwatch.email_monitor.record_alert"),
         patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
@@ -138,6 +140,52 @@ def test_process_email_message_behavior(subject, date, market_hours, expected_no
             mock_notify.assert_called_once_with("AAPL", "daily")
         else:
             mock_notify.assert_not_called()
+
+
+class TestTimeframeEnabled:
+    """Test cases for HVC timeframe enable/disable configuration."""
+
+    @pytest.mark.parametrize(
+        "timeframe,daily,weekly,monthly,expected",
+        [
+            ("daily", True, True, True, True),
+            ("daily", False, True, True, False),
+            ("weekly", True, True, True, True),
+            ("weekly", True, False, True, False),
+            ("monthly", True, True, True, True),
+            ("monthly", True, True, False, False),
+        ],
+    )
+    def test_is_timeframe_enabled(self, timeframe, daily, weekly, monthly, expected):
+        """is_timeframe_enabled respects settings for each timeframe."""
+        with patch("hvcwatch.email_monitor.settings") as mock_settings:
+            mock_settings.hvc_daily_enabled = daily
+            mock_settings.hvc_weekly_enabled = weekly
+            mock_settings.hvc_monthly_enabled = monthly
+
+            assert is_timeframe_enabled(timeframe) == expected
+
+    def test_disabled_timeframe_skips_notification(self):
+        """Disabled timeframe should skip notification entirely."""
+        msg = MagicMock()
+        msg.subject = "Alert: New symbols: AAPL were added to HVC Weekly"
+        msg.date = datetime(2024, 12, 2, 14, 30)
+
+        with (
+            patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
+            patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
+            patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
+            patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=False),
+            patch("hvcwatch.email_monitor.should_alert") as mock_should,
+            patch("hvcwatch.email_monitor.record_alert") as mock_record,
+            patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
+        ):
+            process_email_message(msg)
+
+            # Should not even check should_alert when timeframe is disabled
+            mock_should.assert_not_called()
+            mock_notify.assert_not_called()
+            mock_record.assert_not_called()
 
 
 class TestDeduplication:
@@ -153,6 +201,7 @@ class TestDeduplication:
             patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
             patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
             patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
+            patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
             patch(
                 "hvcwatch.email_monitor.should_alert", return_value=True
             ) as mock_should,
@@ -175,6 +224,7 @@ class TestDeduplication:
             patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
             patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
             patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
+            patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
             patch("hvcwatch.email_monitor.should_alert", return_value=False),
             patch("hvcwatch.email_monitor.record_alert") as mock_record,
             patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
@@ -200,6 +250,7 @@ class TestDeduplication:
                 return_value=["AAPL", "MSFT", "NVDA"],
             ),
             patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
+            patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
             patch(
                 "hvcwatch.email_monitor.should_alert", side_effect=should_alert_returns
             ),
@@ -226,6 +277,7 @@ class TestDeduplication:
             patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
             patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
             patch("hvcwatch.email_monitor.extract_timeframe", return_value="daily"),
+            patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
             patch(
                 "hvcwatch.email_monitor.should_alert", return_value=True
             ) as mock_should,
@@ -248,6 +300,7 @@ class TestDeduplication:
             patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
             patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
             patch("hvcwatch.email_monitor.extract_timeframe", return_value="monthly"),
+            patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
             patch(
                 "hvcwatch.email_monitor.should_alert", return_value=True
             ) as mock_should,

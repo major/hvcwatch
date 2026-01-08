@@ -40,6 +40,11 @@ class Settings(BaseSettings):
 
     log_level: str = Field("INFO", description="Log level")
 
+    # HVC alert type toggles
+    hvc_daily_enabled: bool = Field(False, description="Enable daily HVC alerts")
+    hvc_weekly_enabled: bool = Field(True, description="Enable weekly HVC alerts")
+    hvc_monthly_enabled: bool = Field(True, description="Enable monthly HVC alerts")
+
     imap_host: str = Field("imap.fastmail.com", description="IMAP server host")
     imap_port: int = Field(993, description="IMAP server port")
 
