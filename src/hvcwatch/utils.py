@@ -5,7 +5,7 @@ from functools import cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import pandas_market_calendars as mcal
+import exchange_calendars as xcals
 
 from hvcwatch.logging import logger
 from hvcwatch.types import Timeframe
@@ -106,6 +106,12 @@ def _normalize_to_nyc_timezone(check_time: datetime) -> datetime:
         return check_time.astimezone(nyc_tz)
 
 
+@cache
+def _get_nyse_calendar() -> xcals.ExchangeCalendar:
+    """Get cached NYSE calendar instance."""
+    return xcals.get_calendar("XNYS")
+
+
 def _get_market_schedule(target_date: date) -> tuple[datetime, datetime] | None:
     """
     Get market open and close times for a specific date.
@@ -113,20 +119,14 @@ def _get_market_schedule(target_date: date) -> tuple[datetime, datetime] | None:
     Returns:
         tuple[datetime, datetime] | None: (market_open, market_close) or None if market is closed
     """
-    nyse = mcal.get_calendar("NYSE")
+    nyse = _get_nyse_calendar()
 
-    # Get the market schedule for the target date
-    schedule = nyse.schedule(
-        start_date=target_date, end_date=target_date + timedelta(days=1)
-    )
-
-    # If schedule is empty, market is closed that day
-    if schedule.empty:
+    if not nyse.is_session(target_date):
         return None
 
-    # Extract the timestamps and convert to native Python datetime
-    market_open = schedule.iloc[0]["market_open"].to_pydatetime()
-    market_close = schedule.iloc[0]["market_close"].to_pydatetime()
+    # .to_pydatetime() converts pandas Timestamp to stdlib datetime
+    market_open = nyse.session_open(target_date).to_pydatetime()
+    market_close = nyse.session_close(target_date).to_pydatetime()
 
     return market_open, market_close
 
