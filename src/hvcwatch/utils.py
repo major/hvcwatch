@@ -1,7 +1,7 @@
 import json
 import re
 from datetime import date, datetime, timedelta
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -14,7 +14,7 @@ from hvcwatch.types import Timeframe
 SEC_DATA_PATH = Path(__file__).parent.parent.parent / "data" / "company_tickers.json"
 
 
-@lru_cache(maxsize=1)
+@cache
 def _load_sec_ticker_lookup() -> dict[str, str]:
     """
     Load SEC company tickers data and build ticker->name lookup.
