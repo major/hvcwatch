@@ -1,9 +1,24 @@
+"""Tests for the email monitor.
+
+`process_email_message` and `is_timeframe_enabled` run the real pipeline: real
+ticker and timeframe parsing, market-hours check, dedup in a SQLite file under
+tmp_path, real DiscordNotifier, and real company lookups. Only HTTP is faked
+(`responses`, via the shared fixtures). The IMAP tests still patch the
+functions they wire together.
+"""
+
 import logging
-from datetime import datetime
+import sqlite3
+from contextlib import closing
+from datetime import date, datetime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import responses
+from imap_tools.message import MailMessage
 
+from hvcwatch.db import record_alert
 from hvcwatch.email_monitor import (
     connect_imap,
     get_unread_messages,
@@ -11,6 +26,21 @@ from hvcwatch.email_monitor import (
     monitor_mailbox,
     process_email_message,
 )
+from tests.helpers import SECOND_URL, WEBHOOK_URL, only_embed, posts_to
+
+# 📅 Dates are written in Eastern time. Monday 14:30 is market hours.
+MONDAY = "Mon, 02 Dec 2024 14:30:00 -0500"
+FRIDAY = "Fri, 15 Nov 2024 14:30:00 -0500"
+WEDNESDAY = "Wed, 20 Nov 2024 14:30:00 -0500"
+SATURDAY = "Sat, 07 Dec 2024 14:30:00 -0500"  # 🌙 Market closed
+# 📆 Same month as MONDAY, a year on
+MONDAY_NEXT_YEAR = "Mon, 01 Dec 2025 14:30:00 -0500"
+
+# 📧 Subjects in the format the real alert emails use
+DAILY_SUBJECT = "Alert: New symbols: AAPL were added to HVC"
+WEEKLY_SUBJECT = "Alert: New symbols: AAPL were added to HVC Weekly"
+WEEKLY_THREE_SUBJECT = "Alert: New symbols: AAPL, MSFT, NVDA were added to HVC Weekly"
+MONTHLY_SUBJECT = "Alert: New symbols: AAPL were added to HVC Monthly"
 
 
 @pytest.fixture
@@ -23,12 +53,31 @@ def mock_mailbox():
     return mailbox
 
 
-@pytest.fixture
-def mock_mail_message():
-    msg = MagicMock()
-    msg.subject = "AAPL earnings"
-    msg.date = datetime(2024, 6, 1, 14, 30)
-    return msg
+def make_email(subject: str | None, date_header: str = MONDAY) -> MailMessage:
+    """📨 Build a real imap_tools message. A None subject leaves the header out."""
+    headers = [f"Date: {date_header}"]
+    if subject is not None:
+        headers.insert(0, f"Subject: {subject}")
+    raw = "\r\n".join(headers) + "\r\n\r\nbody"
+    return MailMessage.from_bytes(raw.encode())
+
+
+def read_alert_rows(db_path: Path) -> list[tuple[str, str, str]]:
+    """🗄️ Every (ticker, timeframe, alert_date) row, or [] if nothing was written."""
+    if not db_path.exists():  # 🪄 sqlite3.connect would create the file, so check first
+        return []
+    with closing(sqlite3.connect(db_path)) as conn:
+        return conn.execute(
+            "SELECT ticker, timeframe, alert_date FROM hvc_alerts "
+            "ORDER BY ticker, timeframe, alert_date"
+        ).fetchall()
+
+
+def posted_titles(
+    http_mock: responses.RequestsMock, url: str = WEBHOOK_URL
+) -> list[str]:
+    """🏷️ Embed titles of every POST sent to `url`, in order."""
+    return [only_embed(payload)["title"] for payload in posts_to(http_mock, url)]
 
 
 @pytest.mark.parametrize(
@@ -106,36 +155,214 @@ def test_get_unread_messages_processes_emails(unread_count):
             assert mock_process.call_count == unread_count
 
 
-@pytest.mark.parametrize(
-    "subject,date,market_hours,expected_notify",
-    [
-        (None, datetime(2024, 6, 1, 14, 30), True, False),
-        ("AAPL earnings", datetime(2024, 6, 1, 14, 30), False, False),
-        ("AAPL earnings", datetime(2024, 6, 1, 14, 30), True, True),
-    ],
-)
-def test_process_email_message_behavior(subject, date, market_hours, expected_notify):
-    msg = MagicMock()
-    msg.subject = subject
-    msg.date = date
-    with (
-        patch(
-            "hvcwatch.email_monitor.is_market_hours_or_near", return_value=market_hours
-        ),
-        patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
-        patch("hvcwatch.email_monitor.extract_timeframe", return_value="daily"),
-        patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
-        patch("hvcwatch.email_monitor.should_alert", return_value=True),
-        patch("hvcwatch.email_monitor.record_alert"),
-        patch(
-            "hvcwatch.email_monitor.notify_all_platforms", return_value=1
-        ) as mock_notify,
+class TestProcessEmailMessage:
+    """Real pipeline tests: parsing, market hours, dedup, delivery, and recording."""
+
+    def test_weekly_alert_sends_and_records(
+        self, http_mock, fake_discord, massive, db_path
     ):
+        """📬 A new weekly ticker sends one embed with the company name and records it."""
+        # Arrange
+        fake_discord()
+        massive("AAPL", "Apple Inc.", "CS")
+
+        # Act
+        process_email_message(make_email(WEEKLY_SUBJECT))
+
+        # Assert
+        posts = posts_to(http_mock, WEBHOOK_URL)
+        assert len(posts) == 1
+        embed = only_embed(posts[0])
+        assert embed["title"] == "AAPL"
+        assert embed["description"] == (
+            "**Apple Inc.**\n**Type:** CS\n**Timeframe:** Weekly"
+        )
+        assert read_alert_rows(db_path) == [("AAPL", "weekly", "2024-12-02")]
+
+    def test_duplicate_weekly_email_suppressed(self, http_mock, fake_discord, db_path):
+        """🔁 The same weekly email twice sends one embed and writes one row."""
+        # Arrange
+        fake_discord()
+        msg = make_email(WEEKLY_SUBJECT)
+
+        # Act
         process_email_message(msg)
-        if expected_notify:
-            mock_notify.assert_called_once_with("AAPL", "daily")
-        else:
-            mock_notify.assert_not_called()
+        process_email_message(msg)
+
+        # Assert
+        assert posted_titles(http_mock) == ["AAPL"]
+        assert read_alert_rows(db_path) == [("AAPL", "weekly", "2024-12-02")]
+
+    def test_mixed_dedup_alerts_only_new_tickers(
+        self, http_mock, fake_discord, db_path
+    ):
+        """🧩 AAPL was already sent this week, so only MSFT and NVDA alert."""
+        # Arrange
+        fake_discord()
+        record_alert("AAPL", "weekly", date(2024, 12, 2))
+
+        # Act
+        process_email_message(make_email(WEEKLY_THREE_SUBJECT))
+
+        # Assert
+        assert posted_titles(http_mock) == ["MSFT", "NVDA"]
+        assert read_alert_rows(db_path) == [
+            ("AAPL", "weekly", "2024-12-02"),
+            ("MSFT", "weekly", "2024-12-02"),
+            ("NVDA", "weekly", "2024-12-02"),
+        ]
+
+    def test_daily_always_alerts(
+        self, http_mock, fake_discord, override_settings, db_path
+    ):
+        """☀️ Daily alerts are never deduplicated and never recorded."""
+        # Arrange
+        override_settings(hvc_daily_enabled=True)  # 🔧 Daily is off by default
+        fake_discord()
+        msg = make_email(DAILY_SUBJECT)
+
+        # Act
+        process_email_message(msg)
+        process_email_message(msg)
+
+        # Assert
+        assert posted_titles(http_mock) == ["AAPL", "AAPL"]
+        assert read_alert_rows(db_path) == []
+
+    def test_monthly_alert_uses_email_date_and_dedups_within_month(
+        self, http_mock, fake_discord, db_path
+    ):
+        """📅 The email's Date header picks the stored month, not today's date."""
+        # Arrange
+        fake_discord()
+
+        # Act: the Friday email is stored with its own date
+        process_email_message(make_email(MONTHLY_SUBJECT, FRIDAY))
+
+        # Assert
+        assert read_alert_rows(db_path) == [("AAPL", "monthly", "2024-11-15")]
+
+        # Act: a later email in the same month is suppressed
+        process_email_message(make_email(MONTHLY_SUBJECT, WEDNESDAY))
+
+        # Assert
+        assert posted_titles(http_mock) == ["AAPL"]
+
+        # Act: an email in a new month alerts again
+        process_email_message(make_email(MONTHLY_SUBJECT, MONDAY))
+
+        # Assert
+        assert posted_titles(http_mock) == ["AAPL", "AAPL"]
+        assert read_alert_rows(db_path) == [
+            ("AAPL", "monthly", "2024-11-15"),
+            ("AAPL", "monthly", "2024-12-02"),
+        ]
+
+        # Act: the same month number a year later is a new month
+        process_email_message(make_email(MONTHLY_SUBJECT, MONDAY_NEXT_YEAR))
+
+        # Assert
+        assert posted_titles(http_mock) == ["AAPL", "AAPL", "AAPL"]
+        assert read_alert_rows(db_path)[-1] == ("AAPL", "monthly", "2025-12-01")
+
+    @pytest.mark.parametrize(
+        ("timeframe", "subject"),
+        [
+            pytest.param("daily", DAILY_SUBJECT, id="daily"),
+            pytest.param("weekly", WEEKLY_SUBJECT, id="weekly"),
+            pytest.param("monthly", MONTHLY_SUBJECT, id="monthly"),
+        ],
+    )
+    def test_disabled_timeframe_sends_nothing(
+        self, timeframe, subject, http_mock, fake_discord, override_settings, db_path
+    ):
+        """🔕 A timeframe turned off in config sends nothing and records nothing."""
+        # Arrange
+        override_settings(**{f"hvc_{timeframe}_enabled": False})
+        fake_discord()
+
+        # Act
+        process_email_message(make_email(subject))
+
+        # Assert
+        assert posted_titles(http_mock) == []
+        assert read_alert_rows(db_path) == []
+
+    def test_outside_market_hours_sends_nothing(self, http_mock, fake_discord, db_path):
+        """🌙 A Saturday email is outside market hours, so nothing is sent."""
+        # Arrange
+        fake_discord()
+
+        # Act
+        process_email_message(make_email(WEEKLY_SUBJECT, SATURDAY))
+
+        # Assert
+        assert posted_titles(http_mock) == []
+        assert read_alert_rows(db_path) == []
+
+    @pytest.mark.parametrize(
+        "subject",
+        [
+            pytest.param(None, id="no-subject-header"),
+            pytest.param("Weekly HVC digest", id="digest-without-symbols"),
+        ],
+    )
+    def test_email_without_tickers_sends_nothing(
+        self, subject, http_mock, fake_discord, db_path
+    ):
+        """🔍 An email with no ticker list sends nothing and records nothing."""
+        # Arrange
+        fake_discord()
+
+        # Act
+        process_email_message(make_email(subject))
+
+        # Assert
+        assert posted_titles(http_mock) == []
+        assert read_alert_rows(db_path) == []
+
+    def test_failed_delivery_is_not_recorded_and_a_later_email_alerts_again(
+        self, http_mock, fake_discord, db_path, caplog
+    ):
+        """🔁 Issue #117: a rejected POST is not recorded, so the next email retries."""
+        # Arrange
+        fake_discord(WEBHOOK_URL, status=400)  # 🚫 Discord rejects the first POST
+        fake_discord(WEBHOOK_URL)  # ✅ The next POST succeeds
+        msg = make_email(WEEKLY_SUBJECT)
+
+        # Act
+        with caplog.at_level(logging.WARNING, logger="hvcwatch.email_monitor"):
+            process_email_message(msg)
+
+        # Assert
+        assert len(posts_to(http_mock, WEBHOOK_URL)) == 1
+        assert read_alert_rows(db_path) == []
+        assert "alert not recorded" in caplog.text
+
+        # Act
+        process_email_message(msg)
+
+        # Assert
+        assert len(posts_to(http_mock, WEBHOOK_URL)) == 2
+        assert read_alert_rows(db_path) == [("AAPL", "weekly", "2024-12-02")]
+
+    def test_one_working_webhook_is_enough_to_record(
+        self, http_mock, fake_discord, override_settings, db_path
+    ):
+        """🛡️ One failing webhook does not stop the alert from being recorded."""
+        # Arrange
+        # 📋 The legacy WEBHOOK_URL is listed first, so it is tried before SECOND_URL
+        override_settings(discord_webhook_urls=f"{SECOND_URL}, {WEBHOOK_URL}")
+        fake_discord(WEBHOOK_URL, status=400)
+        fake_discord(SECOND_URL)
+
+        # Act
+        process_email_message(make_email(WEEKLY_SUBJECT))
+
+        # Assert
+        assert len(posts_to(http_mock, WEBHOOK_URL)) == 1
+        assert len(posts_to(http_mock, SECOND_URL)) == 1
+        assert read_alert_rows(db_path) == [("AAPL", "weekly", "2024-12-02")]
 
 
 class TestTimeframeEnabled:
@@ -152,206 +379,20 @@ class TestTimeframeEnabled:
             ("monthly", True, True, False, False),
         ],
     )
-    def test_is_timeframe_enabled(self, timeframe, daily, weekly, monthly, expected):
-        """is_timeframe_enabled respects settings for each timeframe."""
-        with patch("hvcwatch.email_monitor.settings") as mock_settings:
-            mock_settings.hvc_daily_enabled = daily
-            mock_settings.hvc_weekly_enabled = weekly
-            mock_settings.hvc_monthly_enabled = monthly
-
-            assert is_timeframe_enabled(timeframe) == expected
-
-    def test_disabled_timeframe_skips_notification(self):
-        """Disabled timeframe should skip notification entirely."""
-        msg = MagicMock()
-        msg.subject = "Alert: New symbols: AAPL were added to HVC Weekly"
-        msg.date = datetime(2024, 12, 2, 14, 30)
-
-        with (
-            patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
-            patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
-            patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
-            patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=False),
-            patch("hvcwatch.email_monitor.should_alert") as mock_should,
-            patch("hvcwatch.email_monitor.record_alert") as mock_record,
-            patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
-        ):
-            process_email_message(msg)
-
-            # Should not even check should_alert when timeframe is disabled
-            mock_should.assert_not_called()
-            mock_notify.assert_not_called()
-            mock_record.assert_not_called()
-
-
-class TestDeduplication:
-    """Test cases for HVC alert deduplication."""
-
-    def test_weekly_alert_sends_and_records(self):
-        """Weekly alerts should send notification and record to database."""
-        msg = MagicMock()
-        msg.subject = "Alert: New symbols: AAPL were added to HVC Weekly"
-        msg.date = datetime(2024, 12, 2, 14, 30)
-
-        with (
-            patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
-            patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
-            patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
-            patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
-            patch(
-                "hvcwatch.email_monitor.should_alert", return_value=True
-            ) as mock_should,
-            patch("hvcwatch.email_monitor.record_alert") as mock_record,
-            patch(
-                "hvcwatch.email_monitor.notify_all_platforms", return_value=1
-            ) as mock_notify,
-        ):
-            process_email_message(msg)
-
-            mock_should.assert_called_once_with("AAPL", "weekly", msg.date.date())
-            mock_notify.assert_called_once_with("AAPL", "weekly")
-            mock_record.assert_called_once_with("AAPL", "weekly", msg.date.date())
-
-    def test_duplicate_alert_suppressed(self):
-        """Duplicate alerts should be suppressed (no notification, no record)."""
-        msg = MagicMock()
-        msg.subject = "Alert: New symbols: AAPL were added to HVC Weekly"
-        msg.date = datetime(2024, 12, 2, 14, 30)
-
-        with (
-            patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
-            patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
-            patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
-            patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
-            patch("hvcwatch.email_monitor.should_alert", return_value=False),
-            patch("hvcwatch.email_monitor.record_alert") as mock_record,
-            patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
-        ):
-            process_email_message(msg)
-
-            mock_notify.assert_not_called()
-            mock_record.assert_not_called()
-
-    def test_multiple_tickers_mixed_dedup(self):
-        """Multiple tickers: some may alert, others suppressed."""
-        msg = MagicMock()
-        msg.subject = "Alert: New symbols: AAPL, MSFT, NVDA were added to HVC Weekly"
-        msg.date = datetime(2024, 12, 2, 14, 30)
-
-        # AAPL is duplicate, MSFT and NVDA are new
-        should_alert_returns = [False, True, True]
-
-        with (
-            patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
-            patch(
-                "hvcwatch.email_monitor.extract_tickers",
-                return_value=["AAPL", "MSFT", "NVDA"],
-            ),
-            patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
-            patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
-            patch(
-                "hvcwatch.email_monitor.should_alert", side_effect=should_alert_returns
-            ),
-            patch("hvcwatch.email_monitor.record_alert") as mock_record,
-            patch(
-                "hvcwatch.email_monitor.notify_all_platforms", return_value=1
-            ) as mock_notify,
-        ):
-            process_email_message(msg)
-
-            # Only MSFT and NVDA should send
-            assert mock_notify.call_count == 2
-            mock_notify.assert_any_call("MSFT", "weekly")
-            mock_notify.assert_any_call("NVDA", "weekly")
-
-            # Only MSFT and NVDA should be recorded
-            assert mock_record.call_count == 2
-
-    def test_daily_always_alerts(self):
-        """Daily timeframe should always alert (no deduplication)."""
-        msg = MagicMock()
-        msg.subject = "Alert: New symbols: AAPL were added to HVC"
-        msg.date = datetime(2024, 12, 2, 14, 30)
-
-        with (
-            patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
-            patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
-            patch("hvcwatch.email_monitor.extract_timeframe", return_value="daily"),
-            patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
-            patch(
-                "hvcwatch.email_monitor.should_alert", return_value=True
-            ) as mock_should,
-            patch("hvcwatch.email_monitor.record_alert") as mock_record,
-            patch(
-                "hvcwatch.email_monitor.notify_all_platforms", return_value=1
-            ) as mock_notify,
-        ):
-            process_email_message(msg)
-
-            mock_should.assert_called_once_with("AAPL", "daily", msg.date.date())
-            mock_notify.assert_called_once_with("AAPL", "daily")
-            mock_record.assert_called_once()
-
-    def test_uses_email_date_for_alert_date(self):
-        """Should use email date (not today) for deduplication checks."""
-        msg = MagicMock()
-        msg.subject = "Alert: New symbols: AAPL were added to HVC Monthly"
-        msg.date = datetime(2024, 11, 15, 14, 30)  # Date in the past
-
-        with (
-            patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
-            patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
-            patch("hvcwatch.email_monitor.extract_timeframe", return_value="monthly"),
-            patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
-            patch(
-                "hvcwatch.email_monitor.should_alert", return_value=True
-            ) as mock_should,
-            patch("hvcwatch.email_monitor.record_alert") as mock_record,
-            patch("hvcwatch.email_monitor.notify_all_platforms", return_value=1),
-        ):
-            process_email_message(msg)
-
-            # Should use the email's date, not today
-            expected_date = msg.date.date()
-            mock_should.assert_called_once_with("AAPL", "monthly", expected_date)
-            mock_record.assert_called_once_with("AAPL", "monthly", expected_date)
-
-
-class TestRecordOnlyWhenDelivered:
-    """Test cases for recording an alert only after a delivery succeeds."""
-
-    @pytest.mark.parametrize(
-        ("delivered", "expect_recorded"),
-        [
-            pytest.param(0, False, id="no-delivery-not-recorded"),
-            pytest.param(1, True, id="delivery-recorded"),
-        ],
-    )
-    def test_alert_recorded_only_when_a_delivery_succeeds(
-        self, delivered, expect_recorded, caplog
+    def test_is_timeframe_enabled(
+        self, timeframe, daily, weekly, monthly, expected, override_settings
     ):
-        """📝 record_alert runs only when notify_all_platforms reports 1 or more sends."""
+        """is_timeframe_enabled respects settings for each timeframe."""
         # Arrange
-        msg = MagicMock()
-        msg.subject = "Alert: New symbols: AAPL were added to HVC Weekly"
-        msg.date = datetime(2024, 12, 2, 14, 30)
+        override_settings(
+            hvc_daily_enabled=daily,
+            hvc_weekly_enabled=weekly,
+            hvc_monthly_enabled=monthly,
+        )
 
-        with (
-            patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
-            patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
-            patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
-            patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
-            patch("hvcwatch.email_monitor.should_alert", return_value=True),
-            patch("hvcwatch.email_monitor.record_alert") as mock_record,
-            patch(
-                "hvcwatch.email_monitor.notify_all_platforms",
-                return_value=delivered,
-            ),
-            caplog.at_level(logging.INFO, logger="hvcwatch.email_monitor"),
-        ):
-            # Act
-            process_email_message(msg)
+        # Act / Assert
+        assert is_timeframe_enabled(timeframe) == expected
 
-        # Assert
-        assert mock_record.called is expect_recorded
-        assert ("Alert sent" in caplog.text) is expect_recorded
+    def test_unknown_timeframe_is_not_enabled(self):
+        """❓ A timeframe that is not daily, weekly, or monthly is not enabled."""
+        assert not is_timeframe_enabled("yearly")  # ty: ignore[invalid-argument-type]

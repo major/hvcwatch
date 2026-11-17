@@ -17,9 +17,8 @@ from hvcwatch.notification import (
     DiscordNotifier,
     notify_all_platforms,
 )
-from tests.helpers import WEBHOOK_URL, only_embed, posts_to
+from tests.helpers import SECOND_URL, WEBHOOK_URL, only_embed, posts_to
 
-SECOND_URL = "https://discord.com/api/webhooks/second"
 EMBED_COLOR = 0x03B2F8  # discord_webhook converts the "03b2f8" hex string to an int
 FOOTER = "HVC Watch · Major's Bots"
 

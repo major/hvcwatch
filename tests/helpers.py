@@ -12,6 +12,7 @@ import responses
 WEBHOOK_URL = (
     "https://discord.com/api/webhooks/test"  # 🔗 Matches the shared `settings`
 )
+SECOND_URL = "https://discord.com/api/webhooks/second"  # 🔗 A second, extra webhook
 
 
 def posts_to(http_mock: responses.RequestsMock, url: str) -> list[dict[str, Any]]:
