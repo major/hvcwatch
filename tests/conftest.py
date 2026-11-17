@@ -232,33 +232,61 @@ class FakeIdle:
         return self._polls.pop(0)
 
 
+class FakeFolder:
+    """📁 Stand-in for `MailBox.folder`: records SELECT or EXAMINE and answers STATUS."""
+
+    def __init__(self, uidvalidity: int, uidnext: int) -> None:
+        """Store the UIDVALIDITY and UIDNEXT that the server reports for the folder."""
+        self.uidvalidity = uidvalidity
+        self.uidnext = uidnext
+        self.selected: tuple[str, bool] | None = (
+            None  # 🔒 (folder, readonly) of the last set
+        )
+
+    def set(self, folder: str, readonly: bool = False) -> None:
+        """📂 Record the folder and whether it was opened read-only (EXAMINE)."""
+        self.selected = (folder, readonly)
+
+    def status(self, folder: str, options: Sequence[str]) -> dict[str, int]:
+        """📊 Answer STATUS with UIDVALIDITY and UIDNEXT for the requested options."""
+        values = {"UIDVALIDITY": self.uidvalidity, "UIDNEXT": self.uidnext}
+        return {option: values[option] for option in options}
+
+
 class FakeMailBox:
     """
     📭 Stand-in for imap_tools MailBox, scripted one call at a time.
 
     Models the calls production makes: `MailBox(host).login(...)` used as a
-    context manager, `mailbox.idle` used as a context manager with `poll`, and
-    `mailbox.fetch(criteria, mark_seen=...)`. Each `fetch` consumes one list of
-    messages from `fetches`. Each `poll` consumes one result from `polls`. Both
-    raise ScriptExhausted when their script is empty.
+    context manager, `mailbox.folder` (`set` and `status`), `mailbox.idle` used
+    as a context manager with `poll`, and `mailbox.fetch(criteria, mark_seen=...)`.
+    Each `fetch` consumes one list of messages from `fetches`. Each `poll`
+    consumes one result from `polls`. Both raise ScriptExhausted when their
+    script is empty.
     """
 
     def __init__(
         self,
         fetches: Sequence[Sequence[MailMessage]] = (),
         polls: Sequence[list[bytes]] = (),
+        *,
+        uidvalidity: int = 1,
+        uidnext: int = 1,
     ) -> None:
         """Store the scripts. `host` is filled in when the code calls MailBox(host)."""
         self.host: str | None = None
-        self.login_args: tuple[str, str, str] | None = None
+        self.login_args: tuple[str, str, str | None] | None = None
+        self.folder = FakeFolder(uidvalidity, uidnext)
         self.fetch_calls: list[FetchCall] = []
         self.logged_out = False
         self.idle = FakeIdle(polls)
         self._fetches = [list(batch) for batch in fetches]
 
-    def login(self, user: str, password: str, folder: str) -> FakeMailBox:
+    def login(
+        self, user: str, password: str, initial_folder: str | None = "INBOX"
+    ) -> FakeMailBox:
         """🔑 Record the login arguments and return self, as MailBox.login does."""
-        self.login_args = (user, password, folder)
+        self.login_args = (user, password, initial_folder)
         return self
 
     def __enter__(self) -> Self:
@@ -286,9 +314,10 @@ class FakeMailBox:
 @pytest.fixture
 def fake_mailbox(monkeypatch: pytest.MonkeyPatch) -> Callable[..., FakeMailBox]:
     """
-    📭 Factory: `fake_mailbox(fetches=[[...]], polls=[[...]])` replaces MailBox.
+    📭 Factory: `fake_mailbox(fetches=[[...]], polls=[[...]], uidvalidity=1, uidnext=1)`.
 
-    Returns the FakeMailBox so tests can read what the code did to it. Each
+    Replaces MailBox and returns the FakeMailBox so tests can read what the code
+    did to it. The UIDVALIDITY and UIDNEXT values are what STATUS reports. Each
     `MailBox(host)` call in hvcwatch.email_monitor returns that same fake and
     records the host. Undone automatically at the end of the test.
     """
@@ -296,8 +325,11 @@ def fake_mailbox(monkeypatch: pytest.MonkeyPatch) -> Callable[..., FakeMailBox]:
     def _make(
         fetches: Sequence[Sequence[MailMessage]] = (),
         polls: Sequence[list[bytes]] = (),
+        *,
+        uidvalidity: int = 1,
+        uidnext: int = 1,
     ) -> FakeMailBox:
-        mailbox = FakeMailBox(fetches, polls)
+        mailbox = FakeMailBox(fetches, polls, uidvalidity=uidvalidity, uidnext=uidnext)
 
         def _connect(host: str) -> FakeMailBox:
             mailbox.host = host  # 🏷️ Record the server the code asked for

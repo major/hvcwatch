@@ -1,7 +1,8 @@
 """SQLite database for HVC alert tracking.
 
 Prevents duplicate alerts for weekly/monthly HVC timeframes by tracking
-when alerts were last sent for each ticker.
+when alerts were last sent for each ticker. It also stores the IMAP position
+for each folder, so mail is processed once without writing to the server.
 """
 
 import logging
@@ -23,6 +24,11 @@ CREATE TABLE IF NOT EXISTS hvc_alerts (
     PRIMARY KEY (ticker, timeframe, alert_date)
 );
 CREATE INDEX IF NOT EXISTS idx_ticker_timeframe ON hvc_alerts(ticker, timeframe);
+CREATE TABLE IF NOT EXISTS mailbox_cursor (
+    folder TEXT PRIMARY KEY,
+    uidvalidity INTEGER NOT NULL,
+    last_uid INTEGER NOT NULL
+);
 """
 
 
@@ -52,6 +58,44 @@ def _get_connection() -> sqlite3.Connection:
     conn.commit()
 
     return conn
+
+
+def get_cursor(folder: str) -> tuple[int, int] | None:
+    """
+    Get the saved IMAP position for a folder.
+
+    Args:
+        folder: IMAP folder name (e.g., "Trading/ToS Alerts")
+
+    Returns:
+        (uidvalidity, last_uid) if the folder was saved before, otherwise None
+    """
+    with closing(_get_connection()) as conn:
+        row = conn.execute(
+            "SELECT uidvalidity, last_uid FROM mailbox_cursor WHERE folder = ?",
+            (folder,),
+        ).fetchone()
+
+    if row is None:
+        return None
+    return row[0], row[1]
+
+
+def save_cursor(folder: str, uidvalidity: int, last_uid: int) -> None:
+    """
+    Save the IMAP position for a folder, replacing any earlier position.
+
+    Args:
+        folder: IMAP folder name (e.g., "Trading/ToS Alerts")
+        uidvalidity: The folder's UIDVALIDITY the UIDs belong to
+        last_uid: The highest UID already processed
+    """
+    with closing(_get_connection()) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO mailbox_cursor (folder, uidvalidity, last_uid) VALUES (?, ?, ?)",
+            (folder, uidvalidity, last_uid),
+        )
+        conn.commit()
 
 
 def _get_week_monday(d: date) -> date:

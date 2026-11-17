@@ -3,10 +3,10 @@ from datetime import date
 
 from imap_tools.mailbox import BaseMailBox, MailBox
 from imap_tools.message import MailMessage
-from imap_tools.query import AND, A
+from imap_tools.query import A
 
 from hvcwatch import config
-from hvcwatch.db import record_alert, should_alert
+from hvcwatch.db import get_cursor, record_alert, save_cursor, should_alert
 from hvcwatch.notification import Timeframe, notify_all_platforms
 from hvcwatch.utils import extract_tickers, extract_timeframe, is_market_hours_or_near
 
@@ -35,7 +35,10 @@ def is_timeframe_enabled(timeframe: Timeframe) -> bool:
 
 def connect_imap(host: str, user: str, password: str, folder: str) -> None:
     """
-    Connects to an IMAP mailbox and monitors for new emails using simple polling.
+    Connects to an IMAP mailbox read-only and monitors the folder for new emails.
+
+    The folder is opened with EXAMINE, never SELECT, so the server is never
+    written to: no flags are set and no mail is moved. 🔒
 
     Args:
         host (str): The IMAP server hostname.
@@ -48,29 +51,30 @@ def connect_imap(host: str, user: str, password: str, folder: str) -> None:
 
     Side Effects:
         Logs monitoring start and stop events.
-        Calls get_unread_messages and monitor_mailbox to process emails.
+        Calls fetch_new_messages for the backlog and monitor_mailbox for new mail.
     """
-    """Monitor for new emails using simple polling"""
-    with MailBox(host).login(user, password, folder) as mailbox:
-        get_unread_messages(mailbox)
+    # 🔒 initial_folder=None skips the default SELECT, so only the EXAMINE below opens the folder
+    with MailBox(host).login(user, password, initial_folder=None) as mailbox:
+        mailbox.folder.set(folder, readonly=True)
+        fetch_new_messages(mailbox, folder)
 
         try:
             logger.info("Starting email monitoring")
-            monitor_mailbox(mailbox)
+            monitor_mailbox(mailbox, folder)
         except KeyboardInterrupt:  # pragma: no cover
             logger.info("Stopping email monitoring")
 
 
-def monitor_mailbox(mailbox: BaseMailBox) -> None:
+def monitor_mailbox(mailbox: BaseMailBox, folder: str) -> None:
     """
-    Monitors the given mailbox for new emails using the IDLE protocol.
+    Monitors the given folder for new emails using the IDLE protocol.
 
-    Continuously polls the mailbox for new messages. When a new email is detected,
-    logs the event and prints the date and subject of each unseen message, marking
-    them as seen after processing.
+    Waits in IDLE for up to 10 seconds at a time. When the server reports new
+    mail, logs the event and processes everything after the saved cursor.
 
     Args:
-        mailbox (BaseMailBox): The mailbox instance to monitor for incoming emails.
+        mailbox (BaseMailBox): The open, read-only mailbox session to monitor.
+        folder (str): The folder to monitor, passed on to fetch_new_messages.
     """
     while True:
         with mailbox.idle as idle:
@@ -78,40 +82,75 @@ def monitor_mailbox(mailbox: BaseMailBox) -> None:
 
         if responses:
             logger.info("New email detected while IDLE")
-            for msg in mailbox.fetch(A(seen=False), mark_seen=True):
-                process_email_message(msg)
+            fetch_new_messages(mailbox, folder)
 
 
-def get_unread_messages(mailbox: BaseMailBox) -> None:
+def fetch_new_messages(mailbox: BaseMailBox, folder: str) -> None:
     """
-    Fetches unread email messages from the provided mailbox, marks them as seen, and processes each message.
+    Processes the emails in a folder that arrived after the saved UID cursor.
+
+    The cursor is a (UIDVALIDITY, last UID) pair kept in the local SQLite
+    database. Reading mail with BODY.PEEK leaves the server untouched, so no
+    \\Seen flags change. 🔒
+
+    UIDs are only unique within one UIDVALIDITY. On a first run, or when
+    UIDVALIDITY changes (the server renumbered the folder), the cursor moves to
+    UIDNEXT - 1 and nothing is processed. This keeps old mail from sending alerts. 🌱
 
     Args:
-        mailbox (BaseMailBox): The mailbox instance to fetch unread messages from.
-
-    Returns:
-        None
+        mailbox (BaseMailBox): The open, read-only mailbox session.
+        folder (str): The folder name, used as the key for the saved cursor.
 
     Logs:
-        - The start of the unread message check.
-        - The number of unread messages found.
-        - The subject and date of each unread email processed.
+        - Info on a first run.
+        - Warning when UIDVALIDITY changed, with the old and new values.
+        - Info with the subject and date of each new email processed.
     """
-    logger.info("Checking for unread messages")
-    unread_messages = list(mailbox.fetch(AND(seen=False), mark_seen=True))
+    status = mailbox.folder.status(folder, ["UIDVALIDITY", "UIDNEXT"])
+    uidvalidity = status["UIDVALIDITY"]
+    cursor = get_cursor(folder)
 
-    if not unread_messages:
+    if cursor is None or cursor[0] != uidvalidity:
+        if cursor is None:
+            logger.info("First run, skipping existing mail folder=%s", folder)
+        else:
+            logger.warning(
+                "UIDVALIDITY changed, skipping existing mail folder=%s old=%s new=%s",
+                folder,
+                cursor[0],
+                uidvalidity,
+            )
+        save_cursor(folder, uidvalidity, status["UIDNEXT"] - 1)
         return
 
-    logger.info("Processing %s unread messages", len(unread_messages))
+    _, last_uid = cursor
+    fetched = mailbox.fetch(A(uid=f"{last_uid + 1}:*"), mark_seen=False)
+    # 🪤 IMAP's "N:*" always returns the newest message, even when N is past it.
+    # Skip anything at or below the cursor so it is never processed twice.
+    new_messages = [msg for msg in fetched if _uid_of(msg) > last_uid]
 
-    for msg in unread_messages:
+    for msg in new_messages:
         logger.info(
-            "Found unread email subject=%s date=%s",
+            "Found new email subject=%s date=%s",
             msg.subject,
             msg.date.strftime("%Y-%m-%d %H:%M"),
         )
         process_email_message(msg)
+        # 💾 Save after each message, so a later failure does not repeat earlier mail
+        save_cursor(folder, uidvalidity, _uid_of(msg))
+
+
+def _uid_of(msg: MailMessage) -> int:
+    """
+    Return the UID of a fetched message as an int.
+
+    Raises:
+        ValueError: If the server did not send a UID. We always ask for UIDs,
+            so this would mean a broken server response.
+    """
+    if msg.uid is None:
+        raise ValueError("Fetched message has no UID")
+    return int(msg.uid)
 
 
 def process_email_message(msg: MailMessage) -> None:
