@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hvcwatch.config import Settings
 from hvcwatch.db import (
     _get_week_monday,
     record_alert,
@@ -192,6 +193,16 @@ class TestRecordAlert:
         assert should_alert("AAPL", "weekly", today) is False
 
 
+def _real_settings(db_path: str | None) -> Settings:
+    """Build a real Settings object with the given HVCWATCH_DB_PATH value."""
+    return Settings(
+        fastmail_user="u",
+        fastmail_pass="p",
+        discord_webhook_url="https://discord.com/api/webhooks/1",
+        hvcwatch_db_path=db_path,
+    )
+
+
 class TestDatabasePath:
     """Test database path configuration."""
 
@@ -206,6 +217,27 @@ class TestDatabasePath:
 
             # Verify file was created at custom path
             assert db_path.exists()
+
+    def test_creates_missing_parent_dirs_for_configured_path(
+        self, tmp_path, monkeypatch
+    ):
+        """A custom path whose parent directories do not exist should still work."""
+        db_path = tmp_path / "nested" / "deeper" / "custom.db"
+        monkeypatch.setattr("hvcwatch.db.settings", _real_settings(str(db_path)))
+
+        record_alert("TEST", "weekly", date(2024, 12, 2))
+
+        assert db_path.exists()
+        assert should_alert("TEST", "weekly", date(2024, 12, 3)) is False
+
+    def test_empty_path_falls_back_to_default(self, tmp_path, monkeypatch):
+        """HVCWATCH_DB_PATH="" is treated as unset and uses ~/.hvcwatch/alerts.db."""
+        monkeypatch.setattr("hvcwatch.db.settings", _real_settings(""))
+        monkeypatch.setattr("hvcwatch.db.Path.home", lambda: tmp_path)
+
+        record_alert("TEST", "weekly", date(2024, 12, 2))
+
+        assert (tmp_path / ".hvcwatch" / "alerts.db").exists()
 
     def test_uses_default_path_when_not_configured(self, tmp_path):
         """Should use default ~/.hvcwatch/alerts.db when not configured."""
