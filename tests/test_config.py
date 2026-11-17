@@ -43,7 +43,7 @@ class TestFromEnvDefaults:
         assert settings.massive_api_key is None
         assert settings.hvcwatch_db_path is None
         assert settings.log_level == "INFO"
-        assert settings.hvc_daily_enabled is False
+        assert settings.hvc_daily_enabled is True
         assert settings.hvc_weekly_enabled is True
         assert settings.hvc_monthly_enabled is True
         assert settings.imap_host == "imap.fastmail.com"

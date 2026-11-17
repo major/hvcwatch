@@ -105,7 +105,7 @@ class Settings:
     log_level: str = "INFO"
 
     # HVC alert type toggles
-    hvc_daily_enabled: bool = False
+    hvc_daily_enabled: bool = True
     hvc_weekly_enabled: bool = True
     hvc_monthly_enabled: bool = True
 
