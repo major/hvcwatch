@@ -1,0 +1,112 @@
+"""Shared test setup: isolation guards that apply to every test.
+
+Autouse fixtures (nothing to request, they always run):
+    _isolated_home   HOME points into tmp_path, so the real ~/.hvcwatch is unreachable.
+    settings         Real, frozen Settings bound into every module that imports it.
+    http_mock        `responses` is active, so an unregistered HTTP call raises.
+    _clear_ticker_overview_cache   Empties utils._lookup_ticker_overview before and after.
+
+Opt-in fixtures (request them by name):
+    override_settings   Factory that swaps in a changed copy of `settings`.
+    db_path             The SQLite file used by the default `settings`.
+"""
+
+from collections.abc import Callable, Iterator
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+import pytest
+import responses
+
+from hvcwatch import utils
+from hvcwatch.config import Settings
+
+# 📦 `settings` is bound by name in each of these modules (`from ... import settings`),
+# so patching hvcwatch.config.settings alone would change none of them.
+SETTINGS_MODULES = ("main", "email_monitor", "db", "notification", "utils")
+
+
+def _bind_settings(monkeypatch: pytest.MonkeyPatch, value: Settings) -> None:
+    """🔗 Point `settings` in every module that imports it at `value`."""
+    for module in SETTINGS_MODULES:
+        monkeypatch.setattr(f"hvcwatch.{module}.settings", value)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """🏠 Set HOME to a directory inside tmp_path so Path.home() stays in the sandbox."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+@pytest.fixture
+def db_path(tmp_path: Path) -> Path:
+    """🗄️ Path of the throwaway SQLite database used by the default `settings`."""
+    return tmp_path / "alerts.db"
+
+
+@pytest.fixture(autouse=True)
+def settings(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
+    """
+    ⚙️ Real Settings built from an explicit mapping, bound into all five modules.
+
+    Never reads os.environ, so the result is the same on every machine. The
+    database lives in tmp_path and no Massive API key is set. Use
+    `override_settings` to change fields, never a MagicMock.
+    """
+    value = Settings.from_env({
+        "FASTMAIL_USER": "test_user",
+        "FASTMAIL_PASS": "test_password",
+        "DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/test",
+        "HVCWATCH_DB_PATH": str(db_path),
+    })
+    _bind_settings(monkeypatch, value)
+    return value
+
+
+@pytest.fixture
+def override_settings(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> Callable[..., Settings]:
+    """
+    🔁 Factory: `override_settings(imap_port=1143)` swaps in a changed copy.
+
+    Uses dataclasses.replace on the baseline `settings`, rebinds the copy in all
+    five modules, and returns it. Calls build on the baseline, not on each other.
+    Undone automatically at the end of the test.
+    """
+
+    def _override(**changes: Any) -> Settings:
+        value = replace(settings, **changes)
+        _bind_settings(monkeypatch, value)
+        return value
+
+    return _override
+
+
+@pytest.fixture(autouse=True)
+def http_mock() -> Iterator[responses.RequestsMock]:
+    """
+    🔌 Activate `responses` for every test.
+
+    An HTTP call with no registered response raises requests.ConnectionError
+    instead of reaching the network. Register replies with `http_mock.get(...)`.
+    Registered but unused responses are allowed.
+    """
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as mock:
+        yield mock
+
+
+@pytest.fixture(autouse=True)
+def _clear_ticker_overview_cache() -> Iterator[None]:
+    """
+    🧹 Empty the ticker overview cache around each test.
+
+    _get_nyse_calendar is deliberately left alone because it is slow to build.
+    """
+    utils._lookup_ticker_overview.cache_clear()
+    yield
+    utils._lookup_ticker_overview.cache_clear()
