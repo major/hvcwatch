@@ -26,12 +26,12 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "pyright>=1.1.414",
     "pytest>=9.2.0",
     "pytest-cov>=7.1.0",
     "pytest-randomly>=5.1.0",
     "radon>=6.0.1",
     "ruff>=0.17.5",
+    "ty>=0.0.105",
 ]
 
 [tool.pytest.ini_options]
@@ -55,10 +55,6 @@ env = [
     "FASTMAIL_PASS=test_password",
     "DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/test",
 ]
-
-[tool.pyright]
-venvPath = "."
-venv = ".venv"
 
 [tool.ruff]
 fix = true
