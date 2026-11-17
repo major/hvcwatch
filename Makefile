@@ -7,7 +7,7 @@ lint:
 	uv run ruff format
 
 typecheck:
-	uv run pyright src/*
+	uv run ty check src
 
 complexity:
 	uv run radon cc src/ -s -n C --no-assert
