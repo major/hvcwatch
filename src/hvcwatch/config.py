@@ -118,14 +118,16 @@ class Settings:
         """
         🔍 Validate Discord webhook configuration.
 
-        Ensures at least one Discord webhook URL is provided (either via
-        discord_webhook_url or discord_webhook_urls). This maintains backward
-        compatibility while supporting the new multi-webhook feature.
+        Ensures at least one usable Discord webhook URL is provided (either via
+        discord_webhook_url or discord_webhook_urls). Whitespace-only and empty
+        entries do not count. This maintains backward compatibility while
+        supporting the new multi-webhook feature.
 
         Raises:
-            ValueError: If no Discord webhook URLs are configured
+            ValueError: If no usable Discord webhook URLs are configured
         """
-        if not self.discord_webhook_url and not self.discord_webhook_urls:
+        # 🧹 Use the same cleanup as get_discord_webhook_urls()
+        if not self._clean_discord_urls():
             msg = (
                 "At least one Discord webhook URL must be provided via "
                 "DISCORD_WEBHOOK_URL or DISCORD_WEBHOOK_URLS"
@@ -168,6 +170,27 @@ class Settings:
             raise ValueError(msg)
         return cls(**kwargs)
 
+    def _clean_discord_urls(self) -> list[str]:
+        """
+        🧹 Collect usable Discord webhook URLs from both settings.
+
+        Strips whitespace, drops empty entries, and removes duplicates while
+        keeping order. The legacy single URL comes first, then the
+        comma-separated URLs. The single URL is not split on commas.
+
+        Returns:
+            Cleaned, unique URLs. Empty when no usable URL is configured.
+        """
+        candidates: list[str] = []
+        if self.discord_webhook_url:
+            candidates.append(self.discord_webhook_url)
+        if self.discord_webhook_urls:
+            candidates.extend(self.discord_webhook_urls.split(","))
+
+        stripped = (url.strip() for url in candidates)
+        # 🔁 dict keys keep insertion order and drop duplicates
+        return list(dict.fromkeys(url for url in stripped if url))
+
     def get_discord_webhook_urls(self) -> list[str]:
         """
         📋 Get list of Discord webhook URLs from configuration.
@@ -188,29 +211,7 @@ class Settings:
             >>> settings.get_discord_webhook_urls()
             ['https://discord.com/api/webhooks/1', 'https://discord.com/api/webhooks/2', 'https://discord.com/api/webhooks/3']
         """
-        urls: list[str] = []
-
-        # Add legacy single URL if present
-        if self.discord_webhook_url:
-            urls.append(self.discord_webhook_url.strip())
-
-        # Add comma-separated URLs if present
-        if self.discord_webhook_urls:
-            # Split by comma and strip whitespace
-            new_urls = [url.strip() for url in self.discord_webhook_urls.split(",")]
-            # Filter out empty strings
-            new_urls = [url for url in new_urls if url]
-            urls.extend(new_urls)
-
-        # Deduplicate while preserving order
-        seen: set[str] = set()
-        deduplicated: list[str] = []
-        for url in urls:
-            if url not in seen:
-                seen.add(url)
-                deduplicated.append(url)
-
-        return deduplicated
+        return self._clean_discord_urls()
 
 
 settings = Settings.from_env()
