@@ -85,6 +85,7 @@ class TestDiscordNotifierSend:
         http_mock,
         fake_discord,
         massive,
+        settings,
         ticker,
         timeframe,
         overview,
@@ -109,17 +110,32 @@ class TestDiscordNotifierSend:
             "description": embed["description"],
             "color": embed["color"],
             "footer": embed["footer"]["text"],
-            "image": embed.get("image"),  # 🧼 No image: the blank gap is gone
+            "image": embed["image"]["url"],
             "thumbnail": embed["thumbnail"]["url"],
         } == {
             "title": title,
             "description": description,
             "color": color,
             "footer": FOOTER,
-            "image": None,
+            "image": settings.transparent_png,
             "thumbnail": f"https://static.stocktitan.net/company-logo/{ticker.lower()}.webp",
         }
         assert datetime.fromisoformat(embed["timestamp"])
+
+    def test_send_uses_custom_transparent_png(
+        self, http_mock, fake_discord, override_settings
+    ):
+        """🖼️ The embed image comes from settings, not a hardcoded URL."""
+        # Arrange
+        fake_discord()
+        override_settings(transparent_png="https://example.com/clear.png")
+
+        # Act
+        DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
+
+        # Assert
+        (payload,) = posts_to(http_mock, WEBHOOK_URL)
+        assert only_embed(payload)["image"]["url"] == "https://example.com/clear.png"
 
     def test_204_empty_body_is_success(self, http_mock, fake_discord):
         """✅ Discord's 204 (no body) is a successful delivery, not an error."""

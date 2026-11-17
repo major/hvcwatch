@@ -113,6 +113,8 @@ class Settings:
     imap_port: int = 993
     imap_folder: str = "Trading/ToS Alerts"  # IMAP folder to monitor
 
+    transparent_png: str = "https://major.io/transparent.png"
+
     def __post_init__(self) -> None:
         """
         🔍 Validate Discord webhook configuration.
