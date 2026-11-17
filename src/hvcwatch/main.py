@@ -1,7 +1,5 @@
 import logging
 
-import sentry_sdk
-
 from hvcwatch.config import settings
 from hvcwatch.email_monitor import connect_imap
 from hvcwatch.logging_config import setup_logging
@@ -12,23 +10,6 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     setup_logging()
-
-    # Initialize Sentry if DSN is provided
-    if settings.sentry_dsn:
-        sentry_sdk.init(
-            dsn=settings.sentry_dsn,
-            environment=settings.sentry_environment,
-            traces_sample_rate=settings.sentry_traces_sample_rate,
-            # Enable automatic breadcrumbs for common libraries
-            integrations=[],
-            # Attach local variables to exceptions for better debugging
-            attach_stacktrace=True,
-        )
-        logger.info(
-            "Sentry initialized environment=%s traces_sample_rate=%s",
-            settings.sentry_environment,
-            settings.sentry_traces_sample_rate,
-        )
 
     version_info = get_version_info()
     logger.info("Starting HVC Watch email monitor version=%s", version_info)
