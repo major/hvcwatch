@@ -89,8 +89,10 @@ jobs:
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
 
+      # 🚧 Manifest is not yet deployed to homehosted, so this step may fail. Remove continue-on-error once it is.
       - name: Update deployment manifest
         if: github.ref == 'refs/heads/main'
+        continue-on-error: true
         run: |
           cd selfhosted
           DIGEST="${{ steps.build.outputs.digest }}"
