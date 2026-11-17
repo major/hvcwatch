@@ -10,7 +10,7 @@ from contextlib import closing
 from datetime import date, timedelta
 from pathlib import Path
 
-from hvcwatch.config import settings
+from hvcwatch import config
 from hvcwatch.types import Timeframe
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,7 @@ def _get_db_path() -> Path:
     An unset or empty HVCWATCH_DB_PATH uses the default. The parent directory
     is created for either path so sqlite can open the file. 📁
     """
+    settings = config.get_settings()
     if settings.hvcwatch_db_path:
         db_path = Path(settings.hvcwatch_db_path)
     else:

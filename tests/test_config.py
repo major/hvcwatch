@@ -4,6 +4,10 @@ Every case goes through Settings.from_env with an explicit mapping, so the
 tests never read the real environment.
 """
 
+import os
+import subprocess
+import sys
+
 import pytest
 
 from hvcwatch.config import Settings
@@ -223,3 +227,28 @@ class TestGetDiscordWebhookUrls:
 
         # Assert
         assert urls == [URL_A, URL_B]
+
+
+def test_import_reads_no_env_and_get_settings_is_cached():
+    """📦 Importing config works with no env vars, and get_settings returns one object."""
+    # Arrange: a child process with no FASTMAIL_* or DISCORD_* vars. The conftest
+    # patch cannot reach the real get_settings, so this runs in a fresh process.
+    script = """
+from hvcwatch import config  # 💤 Must not raise without env vars
+import os
+os.environ.update(FASTMAIL_USER="u", FASTMAIL_PASS="p")
+os.environ["DISCORD_WEBHOOK_URL"] = "https://discord.com/api/webhooks/1"
+assert config.get_settings() is config.get_settings()
+"""
+
+    # Act
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        env={"PATH": os.environ["PATH"]},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    # Assert
+    assert result.returncode == 0, result.stderr

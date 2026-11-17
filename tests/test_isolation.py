@@ -1,36 +1,29 @@
 """Tests for the autouse isolation guards defined in conftest.py."""
 
-import importlib
 from pathlib import Path
 
 import httpx2
 import pytest
 import requests
 
-from hvcwatch import utils
+from hvcwatch import config, utils
 
-SETTINGS_MODULES = ["main", "email_monitor", "db", "notification", "utils"]
 TICKER_URL = utils.MASSIVE_TICKER_URL.format(ticker="AAPL")
 
 
-@pytest.mark.parametrize("module_name", SETTINGS_MODULES)
-def test_settings_fixture_is_bound_in_every_module(settings, module_name):
-    """⚙️ Each module that imports settings by name sees the fixture value."""
-    module = importlib.import_module(f"hvcwatch.{module_name}")
-
-    assert module.settings is settings
+def test_settings_fixture_is_returned_by_get_settings(settings):
+    """⚙️ config.get_settings() returns the fixture value."""
+    assert config.get_settings() is settings
 
 
-@pytest.mark.parametrize("module_name", SETTINGS_MODULES)
-def test_override_settings_rebinds_every_module(override_settings, module_name):
-    """🔁 override_settings changes the value seen by all five modules."""
+def test_override_settings_changes_get_settings(override_settings):
+    """🔁 override_settings changes the value that config.get_settings() returns."""
     # Act
     changed = override_settings(imap_port=1143)
 
     # Assert
-    module = importlib.import_module(f"hvcwatch.{module_name}")
-    assert module.settings is changed
-    assert module.settings.imap_port == 1143
+    assert config.get_settings() is changed
+    assert config.get_settings().imap_port == 1143
 
 
 def test_override_settings_keeps_the_other_fields(settings, override_settings):

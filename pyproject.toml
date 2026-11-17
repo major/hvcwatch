@@ -9,7 +9,6 @@ dependencies = [
     "exchange-calendars>=4.13.3",
     "discord-webhook>=1.4.1",
     "imap-tools>=1.16.0",
-    "pytest-env>=1.8.5",
     "requests>=2.34.2",
     "httpx2>=2.16.2",
 ]
@@ -48,11 +47,6 @@ addopts = [
 log_format = "%(asctime)s %(levelname)s %(message)s"
 log_date_format = "%Y-%m-%d %H:%M:%S"
 testpaths = ["tests"]
-env = [
-    "FASTMAIL_USER=test_user",
-    "FASTMAIL_PASS=test_password",
-    "DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/test",
-]
 
 [tool.ruff]
 fix = true

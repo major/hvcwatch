@@ -3,6 +3,7 @@
 import os
 from collections.abc import Mapping
 from dataclasses import MISSING, dataclass, fields
+from functools import cache
 from typing import Any
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -214,4 +215,16 @@ class Settings:
         return self._clean_discord_urls()
 
 
-settings = Settings.from_env()
+@cache
+def get_settings() -> Settings:
+    """
+    ⚙️ Return the app Settings, read from os.environ on the first call.
+
+    The read is lazy, so importing this module never fails when env vars are
+    missing. A missing required var raises ValueError on the first call. Errors
+    are not cached, so a later call tries again.
+
+    Returns:
+        The shared Settings instance for this process.
+    """
+    return Settings.from_env()

@@ -2,7 +2,7 @@
 
 Autouse fixtures (nothing to request, they always run):
     _isolated_home   HOME points into tmp_path, so the real ~/.hvcwatch is unreachable.
-    settings         Real, frozen Settings bound into every module that imports it.
+    settings         Real, frozen Settings returned by config.get_settings().
     http_mock        `responses` is active (requests, used by Discord), so an unregistered call raises.
     _httpx2_guard    `httpx2_mock` is active (httpx2, used by Massive), so an unregistered call raises.
     _clear_ticker_overview_cache   Empties utils._lookup_ticker_overview before and after.
@@ -35,10 +35,6 @@ from hvcwatch.logging_config import LOGGER_NAME
 from hvcwatch.utils import MASSIVE_TICKER_URL
 from tests.helpers import WEBHOOK_URL, ScriptExhausted
 
-# 📦 `settings` is bound by name in each of these modules (`from ... import settings`),
-# so patching hvcwatch.config.settings alone would change none of them.
-SETTINGS_MODULES = ("main", "email_monitor", "db", "notification", "utils")
-
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """
@@ -52,12 +48,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     marker = pytest.mark.httpx2_mock(assert_all_responses_were_requested=False)
     for item in items:
         item.add_marker(marker)
-
-
-def _bind_settings(monkeypatch: pytest.MonkeyPatch, value: Settings) -> None:
-    """🔗 Point `settings` in every module that imports it at `value`."""
-    for module in SETTINGS_MODULES:
-        monkeypatch.setattr(f"hvcwatch.{module}.settings", value)
 
 
 @pytest.fixture(autouse=True)
@@ -78,11 +68,12 @@ def db_path(tmp_path: Path) -> Path:
 @pytest.fixture(autouse=True)
 def settings(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
     """
-    ⚙️ Real Settings built from an explicit mapping, bound into all five modules.
+    ⚙️ Real Settings built from an explicit mapping, returned by get_settings().
 
-    Never reads os.environ, so the result is the same on every machine. The
-    database lives in tmp_path and no Massive API key is set. Use
-    `override_settings` to change fields, never a MagicMock.
+    Patches `config.get_settings` so every caller gets this value. Never reads
+    os.environ, so the result is the same on every machine. The database lives
+    in tmp_path and no Massive API key is set. Use `override_settings` to change
+    fields, never a MagicMock.
     """
     value = Settings.from_env({
         "FASTMAIL_USER": "test_user",
@@ -90,7 +81,7 @@ def settings(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
         "DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/test",
         "HVCWATCH_DB_PATH": str(db_path),
     })
-    _bind_settings(monkeypatch, value)
+    monkeypatch.setattr("hvcwatch.config.get_settings", lambda: value)
     return value
 
 
@@ -101,14 +92,14 @@ def override_settings(
     """
     🔁 Factory: `override_settings(imap_port=1143)` swaps in a changed copy.
 
-    Uses dataclasses.replace on the baseline `settings`, rebinds the copy in all
-    five modules, and returns it. Calls build on the baseline, not on each other.
-    Undone automatically at the end of the test.
+    Uses dataclasses.replace on the baseline `settings`, patches get_settings to
+    return the copy, and returns it. Calls build on the baseline, not on each
+    other. Undone automatically at the end of the test.
     """
 
     def _override(**changes: Any) -> Settings:
         value = replace(settings, **changes)
-        _bind_settings(monkeypatch, value)
+        monkeypatch.setattr("hvcwatch.config.get_settings", lambda: value)
         return value
 
     return _override

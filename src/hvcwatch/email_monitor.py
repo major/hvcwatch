@@ -5,7 +5,7 @@ from imap_tools.mailbox import BaseMailBox, MailBox
 from imap_tools.message import MailMessage
 from imap_tools.query import AND, A
 
-from hvcwatch.config import settings
+from hvcwatch import config
 from hvcwatch.db import record_alert, should_alert
 from hvcwatch.notification import Timeframe, notify_all_platforms
 from hvcwatch.utils import extract_tickers, extract_timeframe, is_market_hours_or_near
@@ -23,6 +23,7 @@ def is_timeframe_enabled(timeframe: Timeframe) -> bool:
     Returns:
         True if the timeframe is enabled, False otherwise
     """
+    settings = config.get_settings()
     match timeframe:
         case "daily":
             return settings.hvc_daily_enabled
