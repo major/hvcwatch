@@ -374,12 +374,9 @@ class TestProcessEmailMessage:
             ("NVDA", "weekly", "2024-12-02"),
         ]
 
-    def test_daily_always_alerts(
-        self, http_mock, fake_discord, override_settings, db_path
-    ):
+    def test_daily_always_alerts(self, http_mock, fake_discord, db_path):
         """☀️ Daily alerts are never deduplicated and never recorded."""
         # Arrange
-        override_settings(hvc_daily_enabled=True)  # 🔧 Daily is off by default
         fake_discord()
         msg = make_email(DAILY_SUBJECT)
 
