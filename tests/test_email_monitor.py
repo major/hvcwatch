@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -126,7 +127,9 @@ def test_process_email_message_behavior(subject, date, market_hours, expected_no
         patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
         patch("hvcwatch.email_monitor.should_alert", return_value=True),
         patch("hvcwatch.email_monitor.record_alert"),
-        patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
+        patch(
+            "hvcwatch.email_monitor.notify_all_platforms", return_value=1
+        ) as mock_notify,
     ):
         process_email_message(msg)
         if expected_notify:
@@ -199,7 +202,9 @@ class TestDeduplication:
                 "hvcwatch.email_monitor.should_alert", return_value=True
             ) as mock_should,
             patch("hvcwatch.email_monitor.record_alert") as mock_record,
-            patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
+            patch(
+                "hvcwatch.email_monitor.notify_all_platforms", return_value=1
+            ) as mock_notify,
         ):
             process_email_message(msg)
 
@@ -248,7 +253,9 @@ class TestDeduplication:
                 "hvcwatch.email_monitor.should_alert", side_effect=should_alert_returns
             ),
             patch("hvcwatch.email_monitor.record_alert") as mock_record,
-            patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
+            patch(
+                "hvcwatch.email_monitor.notify_all_platforms", return_value=1
+            ) as mock_notify,
         ):
             process_email_message(msg)
 
@@ -275,7 +282,9 @@ class TestDeduplication:
                 "hvcwatch.email_monitor.should_alert", return_value=True
             ) as mock_should,
             patch("hvcwatch.email_monitor.record_alert") as mock_record,
-            patch("hvcwatch.email_monitor.notify_all_platforms") as mock_notify,
+            patch(
+                "hvcwatch.email_monitor.notify_all_platforms", return_value=1
+            ) as mock_notify,
         ):
             process_email_message(msg)
 
@@ -298,7 +307,7 @@ class TestDeduplication:
                 "hvcwatch.email_monitor.should_alert", return_value=True
             ) as mock_should,
             patch("hvcwatch.email_monitor.record_alert") as mock_record,
-            patch("hvcwatch.email_monitor.notify_all_platforms"),
+            patch("hvcwatch.email_monitor.notify_all_platforms", return_value=1),
         ):
             process_email_message(msg)
 
@@ -306,3 +315,43 @@ class TestDeduplication:
             expected_date = msg.date.date()
             mock_should.assert_called_once_with("AAPL", "monthly", expected_date)
             mock_record.assert_called_once_with("AAPL", "monthly", expected_date)
+
+
+class TestRecordOnlyWhenDelivered:
+    """Test cases for recording an alert only after a delivery succeeds."""
+
+    @pytest.mark.parametrize(
+        ("delivered", "expect_recorded"),
+        [
+            pytest.param(0, False, id="no-delivery-not-recorded"),
+            pytest.param(1, True, id="delivery-recorded"),
+        ],
+    )
+    def test_alert_recorded_only_when_a_delivery_succeeds(
+        self, delivered, expect_recorded, caplog
+    ):
+        """📝 record_alert runs only when notify_all_platforms reports 1 or more sends."""
+        # Arrange
+        msg = MagicMock()
+        msg.subject = "Alert: New symbols: AAPL were added to HVC Weekly"
+        msg.date = datetime(2024, 12, 2, 14, 30)
+
+        with (
+            patch("hvcwatch.email_monitor.is_market_hours_or_near", return_value=True),
+            patch("hvcwatch.email_monitor.extract_tickers", return_value=["AAPL"]),
+            patch("hvcwatch.email_monitor.extract_timeframe", return_value="weekly"),
+            patch("hvcwatch.email_monitor.is_timeframe_enabled", return_value=True),
+            patch("hvcwatch.email_monitor.should_alert", return_value=True),
+            patch("hvcwatch.email_monitor.record_alert") as mock_record,
+            patch(
+                "hvcwatch.email_monitor.notify_all_platforms",
+                return_value=delivered,
+            ),
+            caplog.at_level(logging.INFO, logger="hvcwatch.email_monitor"),
+        ):
+            # Act
+            process_email_message(msg)
+
+        # Assert
+        assert mock_record.called is expect_recorded
+        assert ("Alert sent" in caplog.text) is expect_recorded
