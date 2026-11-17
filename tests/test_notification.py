@@ -5,16 +5,11 @@ DiscordNotifier, DiscordWebhook, DiscordEmbed, and get_company_name run, so the
 tests assert the payload a Discord user would see.
 """
 
-import json
 import logging
-from collections.abc import Callable
 from datetime import datetime
-from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 import requests
-import responses
 
 from hvcwatch.config import Settings
 from hvcwatch.notification import (
@@ -22,86 +17,10 @@ from hvcwatch.notification import (
     DiscordNotifier,
     notify_all_platforms,
 )
-from hvcwatch.utils import MASSIVE_TICKER_URL
+from tests.helpers import SECOND_URL, WEBHOOK_URL, only_embed, posts_to
 
-WEBHOOK_URL = (
-    "https://discord.com/api/webhooks/test"  # 🔗 Matches the shared `settings`
-)
-SECOND_URL = "https://discord.com/api/webhooks/second"
 EMBED_COLOR = 0x03B2F8  # discord_webhook converts the "03b2f8" hex string to an int
 FOOTER = "HVC Watch · Major's Bots"
-
-
-@pytest.fixture
-def fake_discord(http_mock: responses.RequestsMock) -> Callable[..., None]:
-    """
-    🎭 Factory: `fake_discord(url)` registers a Discord webhook that accepts POSTs.
-
-    Replies 200 with a JSON body by default. Any status works, 429 included,
-    because the `sleeps` fixture stops the retry waits from really sleeping.
-    """
-
-    def _register(url: str = WEBHOOK_URL, status: int = 200, **reply: Any) -> None:
-        if "body" not in reply:  # 🧩 responses rejects json and body together
-            reply.setdefault("json", {"id": "1"})
-        http_mock.post(url, status=status, **reply)
-
-    return _register
-
-
-@pytest.fixture(autouse=True)
-def sleeps(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    """
-    💤 Record every retry wait instead of sleeping.
-
-    Also turns jitter off, so the waits are exact (1, 2, 4 seconds) and no
-    test really sleeps. Returns the sleep mock for assertions.
-    """
-    sleep = MagicMock()
-    monkeypatch.setattr("hvcwatch.notification.time.sleep", sleep)
-    monkeypatch.setattr("hvcwatch.notification._with_jitter", lambda delay: delay)
-    return sleep
-
-
-@pytest.fixture
-def massive(
-    http_mock: responses.RequestsMock, override_settings: Callable[..., Settings]
-) -> Callable[..., None]:
-    """
-    🏢 Factory: `massive("AAPL", "Apple Inc.", "CS")` fakes the Massive overview call.
-
-    Sets a Massive API key (without one, lookups are skipped), then registers the
-    ticker endpoint. Pass name=None to fake a 404 (unknown ticker).
-    """
-    override_settings(massive_api_key="test-key")
-
-    def _register(ticker: str, name: str | None, type_: str | None = None) -> None:
-        url = MASSIVE_TICKER_URL.format(ticker=ticker.upper())
-        if name is None:
-            http_mock.get(url, status=404, json={"status": "NOT_FOUND"})
-            return
-        results = {"name": name, **({"type": type_} if type_ else {})}
-        http_mock.get(url, json={"results": results})
-
-    return _register
-
-
-def posts_to(http_mock: responses.RequestsMock, url: str) -> list[dict[str, Any]]:
-    """📬 JSON bodies of every POST sent to `url`, in order."""
-    bodies: list[dict[str, Any]] = []
-    for call in http_mock.calls:
-        request = call.request
-        if request.method != "POST" or (request.url or "").split("?")[0] != url:
-            continue
-        assert isinstance(request.body, bytes)  # 📦 requests encodes json= as bytes
-        bodies.append(json.loads(request.body))
-    return bodies
-
-
-def only_embed(payload: dict[str, Any]) -> dict[str, Any]:
-    """🪟 The single embed in a webhook payload."""
-    assert len(payload["embeds"]) == 1
-    return payload["embeds"][0]
 
 
 class TestDiscordNotifierSend:
