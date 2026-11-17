@@ -49,6 +49,7 @@ class TestFromEnvDefaults:
         assert settings.imap_host == "imap.fastmail.com"
         assert settings.imap_port == 993
         assert settings.imap_folder == "Trading/ToS Alerts"
+        assert settings.transparent_png == "https://major.io/transparent.png"
 
 
 class TestFromEnvValues:
@@ -75,6 +76,12 @@ class TestFromEnvValues:
             ("IMAP_HOST", "imap.example.com", "imap_host", "imap.example.com"),
             ("IMAP_PORT", "1143", "imap_port", 1143),
             ("IMAP_FOLDER", "INBOX", "imap_folder", "INBOX"),
+            (
+                "TRANSPARENT_PNG",
+                "https://example.com/t.png",
+                "transparent_png",
+                "https://example.com/t.png",
+            ),
         ],
     )
     def test_env_var_populates_field(self, base_env, name, raw, field, expected):

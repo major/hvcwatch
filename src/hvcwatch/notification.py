@@ -233,6 +233,8 @@ class DiscordNotifier:
             embed.add_embed_field(name=name, value=value, inline=True)
         logo_url = f"https://static.stocktitan.net/company-logo/{ticker.lower()}.webp"
         embed.set_thumbnail(url=logo_url)
+        # 🖼️ The transparent image is blank, but it forces every embed to full width
+        embed.set_image(url=config.get_settings().transparent_png)
         embed.set_footer(text="HVC Watch · Major's Bots")
         embed.set_timestamp()
         webhook.add_embed(embed)
