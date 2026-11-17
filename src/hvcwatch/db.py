@@ -27,13 +27,18 @@ CREATE INDEX IF NOT EXISTS idx_ticker_timeframe ON hvc_alerts(ticker, timeframe)
 
 
 def _get_db_path() -> Path:
-    """Get database path from settings or default to ~/.hvcwatch/alerts.db."""
-    if settings.hvcwatch_db_path:
-        return Path(settings.hvcwatch_db_path)
+    """Get database path from settings or default to ~/.hvcwatch/alerts.db.
 
-    default_dir = Path.home() / ".hvcwatch"
-    default_dir.mkdir(parents=True, exist_ok=True)
-    return default_dir / "alerts.db"
+    An unset or empty HVCWATCH_DB_PATH uses the default. The parent directory
+    is created for either path so sqlite can open the file. 📁
+    """
+    if settings.hvcwatch_db_path:
+        db_path = Path(settings.hvcwatch_db_path)
+    else:
+        db_path = Path.home() / ".hvcwatch" / "alerts.db"
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    return db_path
 
 
 def _get_connection() -> sqlite3.Connection:
