@@ -97,7 +97,7 @@ class Settings:
     discord_webhook_url: str | None = None  # Deprecated, use discord_webhook_urls
     discord_webhook_urls: str | None = None  # Comma-separated Discord webhook URLs
 
-    massive_api_key: str | None = None  # Massive API key for company name lookups
+    massive_api_key: str | None = None  # Massive API key for company name and ticker type lookups
 
     hvcwatch_db_path: str | None = None  # SQLite database path for alert tracking
 
