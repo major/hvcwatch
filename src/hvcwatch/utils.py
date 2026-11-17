@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
 import requests
+from exchange_calendars.errors import DateOutOfBounds
 
 from hvcwatch.config import settings
 from hvcwatch.types import Timeframe
@@ -213,25 +214,33 @@ def _is_time_in_range(
     return start_time <= target_time <= end_time
 
 
-def is_market_hours_or_near(
-    check_time: datetime = datetime.now(), hours: int = 1
-) -> bool:
+def is_market_hours_or_near(check_time: datetime, hours: int = 1) -> bool:
     """
     Returns True if the NYSE market is open or if the specified time
     (in NYC timezone) is within the specified hours of market open or close.
 
     Args:
-        check_time: Datetime to check. If None, uses current time (default: None)
+        check_time: Datetime to check. Required, so callers decide which clock to use.
         hours: Number of hours before/after market open/close to consider "near" (default: 1)
 
     Returns:
-        bool: True if market is open or within specified hours of open/close, False otherwise
+        bool: True if market is open or within specified hours of open/close, False otherwise.
+            Also False, with a warning, when the date is outside the NYSE calendar range.
     """
     # Normalize to NYC timezone
     nyc_time = _normalize_to_nyc_timezone(check_time)
 
     # Get market schedule for the date
-    market_schedule = _get_market_schedule(nyc_time.date())
+    try:
+        market_schedule = _get_market_schedule(nyc_time.date())
+    except DateOutOfBounds:
+        # 📭 imap_tools reports a missing or unparseable Date as 1900-01-01, which
+        # is far before the calendar start. One bad email must not stop the monitor.
+        logger.warning(
+            "Check time is outside the NYSE calendar range check_time=%s",
+            check_time.isoformat(),
+        )
+        return False
     if market_schedule is None:
         return False  # Market is closed (holiday)
 
