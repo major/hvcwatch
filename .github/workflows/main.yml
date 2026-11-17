@@ -75,13 +75,13 @@ jobs:
             GIT_COMMIT=${{ github.sha }}
             GIT_BRANCH=${{ github.ref_name }}
 
-      - name: Checkout selfhosted repository
+      - name: Checkout homehosted repository
         if: github.ref == 'refs/heads/main'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          repository: major/selfhosted
-          token: ${{ secrets.SELFHOSTED_PAT }}
-          path: selfhosted
+          repository: major/homehosted
+          token: ${{ secrets.HOMEHOSTED_PAT }}
+          path: homehosted
 
       - name: Configure git
         if: github.ref == 'refs/heads/main'
@@ -89,20 +89,26 @@ jobs:
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
 
-      # 🚧 Manifest is not yet deployed to homehosted, so this step may fail. Remove continue-on-error once it is.
+      # 🚀 Point the homehosted Flux HelmRelease at the new image digest so Flux rolls it out
       - name: Update deployment manifest
         if: github.ref == 'refs/heads/main'
-        continue-on-error: true
         run: |
-          cd selfhosted
+          cd homehosted
           DIGEST="${{ steps.build.outputs.digest }}"
-          sed -i "s|ghcr.io/major/hvcwatch:latest@sha256:[a-f0-9]*|ghcr.io/major/hvcwatch:latest@${DIGEST}|g" apps/base/hvcwatch/deployment.yaml
+          HELMRELEASE=apps/hvcwatch/helm/helmrelease.yaml
+          sed -i "s|tag: latest@sha256:[a-f0-9]*|tag: latest@${DIGEST}|" "$HELMRELEASE"
 
-          if git diff --quiet apps/base/hvcwatch/deployment.yaml; then
-            echo "No changes to deployment.yaml, skipping commit"
+          # 🔍 Fail if the tag line was not found, so a changed file layout cannot pass silently
+          grep -qF "tag: latest@${DIGEST}" "$HELMRELEASE" || {
+            echo "::error::No 'tag: latest@sha256:' line found in $HELMRELEASE"
+            exit 1
+          }
+
+          if git diff --quiet "$HELMRELEASE"; then
+            echo "No changes to $HELMRELEASE, skipping commit"
             exit 0
           fi
 
-          git add apps/base/hvcwatch/deployment.yaml
+          git add "$HELMRELEASE"
           git commit -m "🤖 Update hvcwatch deployment to ${DIGEST}"
           git push
