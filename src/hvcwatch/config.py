@@ -1,63 +1,132 @@
 """Configuration values for the stocknews package."""
 
-from pydantic import AliasChoices, Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+import os
+from collections.abc import Mapping
+from dataclasses import MISSING, dataclass, fields
+from typing import Any
+
+# 🔑 Env var names for fields that do not use their UPPERCASE field name.
+# POLYGON_API_KEY is still accepted so existing setups keep working.
+_ENV_ALIASES: dict[str, tuple[str, ...]] = {
+    "massive_api_key": ("MASSIVE_API_KEY", "POLYGON_API_KEY"),
+}
+
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
 
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-    )
+def _parse_bool(name: str, raw: str) -> bool:
+    """
+    🔘 Parse a boolean env value.
 
-    fastmail_user: str = Field(..., description="Fastmail username")
-    fastmail_pass: str = Field(..., description="Fastmail password")
+    Args:
+        name: Env var name, used in the error message.
+        raw: Raw string value from the environment.
+
+    Returns:
+        True or False for the accepted spellings (case-insensitive).
+
+    Raises:
+        ValueError: If the value is not an accepted boolean spelling.
+    """
+    value = raw.strip().lower()
+    if value in _TRUE_VALUES:
+        return True
+    if value in _FALSE_VALUES:
+        return False
+    msg = f"{name} must be one of 1/true/yes/on or 0/false/no/off, got {raw!r}"
+    raise ValueError(msg)
+
+
+def _parse_int(name: str, raw: str) -> int:
+    """
+    🔢 Convert an int env value, naming the variable on failure.
+
+    Args:
+        name: Env var name, used in the error message.
+        raw: Raw string value from the environment.
+
+    Returns:
+        The value as an int.
+
+    Raises:
+        ValueError: If the value is not a valid int.
+    """
+    try:
+        return int(raw)
+    except ValueError as exc:
+        msg = f"{name} must be a valid int, got {raw!r}"
+        raise ValueError(msg) from exc
+
+
+def _coerce(name: str, raw: str, target: Any) -> Any:
+    """
+    🔄 Convert a raw env string to the type of a Settings field.
+
+    Args:
+        name: Env var name, used in error messages.
+        raw: Raw string value from the environment.
+        target: The field type with `str | None` already reduced to `str`.
+
+    Returns:
+        The value in the target type. Strings are returned unchanged.
+    """
+    if target is bool:
+        return _parse_bool(name, raw)
+    if target is int:
+        return _parse_int(name, raw)
+    return raw
+
+
+def _base_type(annotation: Any) -> Any:
+    """
+    🧭 Reduce `str | None` to `str` so coercion only sees the core type.
+
+    Args:
+        annotation: The field's type annotation.
+
+    Returns:
+        `str` for `str | None`, otherwise the annotation unchanged.
+    """
+    return str if annotation == str | None else annotation
+
+
+@dataclass(frozen=True)
+class Settings:
+    """⚙️ Runtime configuration, usually built with Settings.from_env()."""
+
+    # Fastmail credentials (required)
+    fastmail_user: str
+    fastmail_pass: str
 
     # Discord configuration - supports multiple webhooks
-    discord_webhook_url: str | None = Field(
-        None, description="Discord webhook URL (deprecated, use discord_webhook_urls)"
-    )
-    discord_webhook_urls: str | None = Field(
-        None, description="Comma-separated Discord webhook URLs"
-    )
+    discord_webhook_url: str | None = None  # Deprecated, use discord_webhook_urls
+    discord_webhook_urls: str | None = None  # Comma-separated Discord webhook URLs
 
-    # 🔑 POLYGON_API_KEY is still accepted so existing .env files keep loading
-    massive_api_key: str | None = Field(
-        None,
-        validation_alias=AliasChoices("massive_api_key", "polygon_api_key"),
-        description="Massive API key for company name lookups (optional)",
-    )
+    massive_api_key: str | None = None  # Massive API key for company name lookups
 
-    hvcwatch_db_path: str | None = Field(
-        None, description="Path to SQLite database for alert tracking"
-    )
+    hvcwatch_db_path: str | None = None  # SQLite database path for alert tracking
 
-    log_level: str = Field("INFO", description="Log level")
+    log_level: str = "INFO"
 
     # HVC alert type toggles
-    hvc_daily_enabled: bool = Field(False, description="Enable daily HVC alerts")
-    hvc_weekly_enabled: bool = Field(True, description="Enable weekly HVC alerts")
-    hvc_monthly_enabled: bool = Field(True, description="Enable monthly HVC alerts")
+    hvc_daily_enabled: bool = False
+    hvc_weekly_enabled: bool = True
+    hvc_monthly_enabled: bool = True
 
-    imap_host: str = Field("imap.fastmail.com", description="IMAP server host")
-    imap_port: int = Field(993, description="IMAP server port")
-
-    imap_folder: str = Field("Trading/ToS Alerts", description="IMAP folder to monitor")
+    imap_host: str = "imap.fastmail.com"
+    imap_port: int = 993
+    imap_folder: str = "Trading/ToS Alerts"  # IMAP folder to monitor
 
     transparent_png: str = "https://major.io/transparent.png"
 
-    @model_validator(mode="after")
-    def validate_discord_config(self) -> "Settings":
+    def __post_init__(self) -> None:
         """
         🔍 Validate Discord webhook configuration.
 
         Ensures at least one Discord webhook URL is provided (either via
         discord_webhook_url or discord_webhook_urls). This maintains backward
         compatibility while supporting the new multi-webhook feature.
-
-        Returns:
-            Self with validated Discord configuration
 
         Raises:
             ValueError: If no Discord webhook URLs are configured
@@ -68,7 +137,44 @@ class Settings(BaseSettings):
                 "DISCORD_WEBHOOK_URL or DISCORD_WEBHOOK_URLS"
             )
             raise ValueError(msg)
-        return self
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
+        """
+        🌱 Build Settings from environment variables.
+
+        Each field reads the env var with its UPPERCASE name, unless it is listed
+        in _ENV_ALIASES. Fields with no env var set use their dataclass default.
+        Values are coerced to the field type. Only env vars are read, not .env files.
+
+        Args:
+            env: Mapping to read from. Defaults to os.environ.
+
+        Returns:
+            A validated Settings instance.
+
+        Raises:
+            ValueError: If a required var is missing, a value cannot be parsed,
+                or no Discord webhook URL is configured. The missing-vars error
+                lists every missing name.
+        """
+        source: Mapping[str, str] = os.environ if env is None else env
+        kwargs: dict[str, Any] = {}
+        missing: list[str] = []
+
+        for f in fields(cls):
+            names = _ENV_ALIASES.get(f.name, (f.name.upper(),))
+            # 🎯 Use the first alias that is set in the source
+            name = next((n for n in names if n in source), None)
+            if name is not None:
+                kwargs[f.name] = _coerce(name, source[name], _base_type(f.type))
+            elif f.default is MISSING and f.default_factory is MISSING:
+                missing.append(names[0])
+
+        if missing:
+            msg = f"Missing required environment variables: {', '.join(missing)}"
+            raise ValueError(msg)
+        return cls(**kwargs)
 
     def get_discord_webhook_urls(self) -> list[str]:
         """
@@ -81,8 +187,12 @@ class Settings(BaseSettings):
             List of Discord webhook URLs (deduplicated and stripped)
 
         Example:
-            >>> settings.discord_webhook_url = "https://discord.com/api/webhooks/1"
-            >>> settings.discord_webhook_urls = "https://discord.com/api/webhooks/2,https://discord.com/api/webhooks/3"
+            >>> settings = Settings(
+            ...     fastmail_user="u",
+            ...     fastmail_pass="p",
+            ...     discord_webhook_url="https://discord.com/api/webhooks/1",
+            ...     discord_webhook_urls="https://discord.com/api/webhooks/2,https://discord.com/api/webhooks/3",
+            ... )
             >>> settings.get_discord_webhook_urls()
             ['https://discord.com/api/webhooks/1', 'https://discord.com/api/webhooks/2', 'https://discord.com/api/webhooks/3']
         """
@@ -111,4 +221,4 @@ class Settings(BaseSettings):
         return deduplicated
 
 
-settings = Settings()  # type: ignore[call-arg]
+settings = Settings.from_env()
