@@ -1,368 +1,325 @@
-"""Tests for notification module."""
+"""Tests for the notification module.
+
+Only HTTP is faked (`responses`, via the shared `http_mock` fixture). The real
+DiscordNotifier, DiscordWebhook, DiscordEmbed, and get_company_name run, so the
+tests assert the payload a Discord user would see.
+"""
+
+import json
+import logging
+from collections.abc import Callable
+from datetime import datetime
+from typing import Any
 
 import pytest
-from unittest.mock import Mock, patch
+import requests
+import responses
 
-from hvcwatch.notification import (
-    DiscordNotifier,
-    notify_all_platforms,
+from hvcwatch.config import Settings
+from hvcwatch.notification import DiscordNotifier, notify_all_platforms
+from hvcwatch.utils import MASSIVE_TICKER_URL
+
+WEBHOOK_URL = (
+    "https://discord.com/api/webhooks/test"  # 🔗 Matches the shared `settings`
 )
-
-
-# Mock get_company_name to return known values for test tickers
-@pytest.fixture(autouse=True)
-def mock_company_names():
-    company_names = {
-        "AAPL": "Apple Inc.",
-        "TSLA": "Tesla, Inc.",
-        "NVDA": "NVIDIA CORP",
-        "MSFT": "MICROSOFT CORP",
-        "GOOGL": "Alphabet Inc.",
-        "AMZN": "AMAZON COM INC",
-    }
-    with patch(
-        "hvcwatch.notification.get_company_name",
-        side_effect=lambda t: company_names.get(t.upper()),
-    ):
-        yield
-
-
-# Mock get_ticker_type so no test hits the network and existing descriptions stay the same
-@pytest.fixture(autouse=True)
-def mock_ticker_types():
-    with patch("hvcwatch.notification.get_ticker_type", return_value=None):
-        yield
+SECOND_URL = "https://discord.com/api/webhooks/second"
+EMBED_COLOR = 0x03B2F8  # discord_webhook converts the "03b2f8" hex string to an int
+FOOTER = "HVC Watch · Major's Bots"
 
 
 @pytest.fixture
-def mock_settings():
-    """Mock settings with Discord webhook URL and transparent PNG."""
-    with patch("hvcwatch.notification.settings") as mock_settings:
-        mock_settings.discord_webhook_url = "https://discord.com/api/webhooks/test"
-        mock_settings.transparent_png = "https://example.com/transparent.png"
-        yield mock_settings
+def fake_discord(http_mock: responses.RequestsMock) -> Callable[..., None]:
+    """
+    🎭 Factory: `fake_discord(url)` registers a Discord webhook that accepts POSTs.
+
+    Replies 200 with a JSON body, because DiscordWebhook.execute always runs
+    json.loads on the body (an empty body raises JSONDecodeError). Never 429,
+    since the library would then call a real sleep.
+    """
+
+    def _register(url: str = WEBHOOK_URL, status: int = 200, **reply: Any) -> None:
+        assert status != 429, "a 429 reply makes discord_webhook sleep for real"
+        if "body" not in reply:  # 🧩 responses rejects json and body together
+            reply.setdefault("json", {"id": "1"})
+        http_mock.post(url, status=status, **reply)
+
+    return _register
 
 
 @pytest.fixture
-def mock_discord_webhook():
-    """Mock DiscordWebhook and DiscordEmbed."""
-    with (
-        patch("hvcwatch.notification.DiscordWebhook") as mock_webhook_class,
-        patch("hvcwatch.notification.DiscordEmbed") as mock_embed_class,
-    ):
-        mock_webhook = Mock()
-        mock_embed = Mock()
-        mock_webhook_class.return_value = mock_webhook
-        mock_embed_class.return_value = mock_embed
+def massive(
+    http_mock: responses.RequestsMock, override_settings: Callable[..., Settings]
+) -> Callable[..., None]:
+    """
+    🏢 Factory: `massive("AAPL", "Apple Inc.", "CS")` fakes the Massive overview call.
 
-        # Mock the webhook response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_webhook.execute.return_value = mock_response
+    Sets a Massive API key (without one, lookups are skipped), then registers the
+    ticker endpoint. Pass name=None to fake a 404 (unknown ticker).
+    """
+    override_settings(massive_api_key="test-key")
 
-        yield mock_webhook_class, mock_embed_class, mock_webhook, mock_embed
+    def _register(ticker: str, name: str | None, type_: str | None = None) -> None:
+        url = MASSIVE_TICKER_URL.format(ticker=ticker.upper())
+        if name is None:
+            http_mock.get(url, status=404, json={"status": "NOT_FOUND"})
+            return
+        results = {"name": name, **({"type": type_} if type_ else {})}
+        http_mock.get(url, json={"results": results})
+
+    return _register
+
+
+def posts_to(http_mock: responses.RequestsMock, url: str) -> list[dict[str, Any]]:
+    """📬 JSON bodies of every POST sent to `url`, in order."""
+    bodies: list[dict[str, Any]] = []
+    for call in http_mock.calls:
+        request = call.request
+        if request.method != "POST" or (request.url or "").split("?")[0] != url:
+            continue
+        assert isinstance(request.body, bytes)  # 📦 requests encodes json= as bytes
+        bodies.append(json.loads(request.body))
+    return bodies
+
+
+def only_embed(payload: dict[str, Any]) -> dict[str, Any]:
+    """🪟 The single embed in a webhook payload."""
+    assert len(payload["embeds"]) == 1
+    return payload["embeds"][0]
 
 
 class TestDiscordNotifierSend:
-    """Test DiscordNotifier send method."""
-
-    def test_send_daily_alert(
-        self,
-        mock_settings,
-        mock_discord_webhook,
-    ):
-        """Test sending a daily alert."""
-        mock_webhook_class, mock_embed_class, mock_webhook, mock_embed = (
-            mock_discord_webhook
-        )
-
-        webhook_url = "https://discord.com/api/webhooks/test"
-        notifier = DiscordNotifier(webhook_url=webhook_url)
-        notifier.send("AAPL", "daily")
-
-        # Verify webhook creation
-        mock_webhook_class.assert_called_once_with(
-            url=webhook_url, rate_limit_retry=True
-        )
-
-        # Verify embed creation - title is ticker, description includes company name
-        mock_embed_class.assert_called_once_with(
-            title="AAPL",
-            description="**Apple Inc.**\n**Timeframe:** Daily",
-            color="03b2f8",
-        )
-
-        # Verify embed methods were called
-        mock_embed.set_footer.assert_called_once_with(text="HVC Watch · Major's Bots")
-        mock_embed.set_image.assert_called_once_with(url=mock_settings.transparent_png)
-        mock_embed.set_timestamp.assert_called_once()
-
-        # Verify webhook operations
-        mock_webhook.add_embed.assert_called_once_with(mock_embed)
-        mock_webhook.execute.assert_called_once()
-
-    def test_send_weekly_alert(
-        self,
-        mock_settings,
-        mock_discord_webhook,
-    ):
-        """Test sending a weekly alert."""
-        mock_webhook_class, mock_embed_class, mock_webhook, mock_embed = (
-            mock_discord_webhook
-        )
-
-        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
-        notifier.send("TSLA", "weekly")
-
-        # Verify embed has weekly timeframe with company name (no emoji)
-        mock_embed_class.assert_called_once_with(
-            title="TSLA",
-            description="**Tesla, Inc.**\n**Timeframe:** Weekly",
-            color="03b2f8",
-        )
-
-    def test_send_monthly_alert_with_fire_emoji(
-        self,
-        mock_settings,
-        mock_discord_webhook,
-    ):
-        """Test sending a monthly alert with fire emoji."""
-        mock_webhook_class, mock_embed_class, mock_webhook, mock_embed = (
-            mock_discord_webhook
-        )
-
-        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
-        notifier.send("NVDA", "monthly")
-
-        # Verify embed has monthly timeframe with company name and fire emoji
-        mock_embed_class.assert_called_once_with(
-            title="NVDA",
-            description="**NVIDIA CORP**\n**Timeframe:** Monthly 🔥",
-            color="03b2f8",
-        )
+    """DiscordNotifier.send: the embed Discord receives."""
 
     @pytest.mark.parametrize(
-        ("ticker_type", "expected_description"),
+        ("ticker", "timeframe", "overview", "description"),
         [
-            ("ETF", "**Apple Inc.**\n**Type:** ETF\n**Timeframe:** Daily"),
-            (None, "**Apple Inc.**\n**Timeframe:** Daily"),
+            pytest.param(
+                "AAPL",
+                "daily",
+                ("Apple Inc.", "CS"),
+                "**Apple Inc.**\n**Type:** CS\n**Timeframe:** Daily",
+                id="daily-with-name-and-type",
+            ),
+            pytest.param(
+                "TSLA",
+                "weekly",
+                ("Tesla, Inc.", "CS"),
+                "**Tesla, Inc.**\n**Type:** CS\n**Timeframe:** Weekly",
+                id="weekly",
+            ),
+            pytest.param(
+                "NVDA",
+                "monthly",
+                ("NVIDIA CORP", "CS"),
+                "**NVIDIA CORP**\n**Type:** CS\n**Timeframe:** Monthly 🔥",
+                id="monthly-has-fire-emoji",
+            ),
+            pytest.param(
+                "SPY",
+                "daily",
+                ("SPDR S&P 500 ETF Trust", None),
+                "**SPDR S&P 500 ETF Trust**\n**Timeframe:** Daily",
+                id="type-missing-drops-type-line",
+            ),
+            pytest.param(
+                "ZZZZ",
+                "daily",
+                (None, None),
+                "**Timeframe:** Daily",
+                id="company-name-none-drops-name-line",
+            ),
         ],
-        ids=["type-shown", "type-omitted"],
     )
-    def test_send_type_line_between_company_and_timeframe(
-        self, mock_settings, mock_discord_webhook, ticker_type, expected_description
+    def test_send_posts_expected_embed(
+        self,
+        http_mock,
+        fake_discord,
+        massive,
+        settings,
+        ticker,
+        timeframe,
+        overview,
+        description,
     ):
-        """✅ A known ticker type gets its own line; a None type adds no line."""
+        """✅ One POST whose embed carries every field a user sees."""
         # Arrange
-        _, mock_embed_class, _, _ = mock_discord_webhook
-        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
+        fake_discord()
+        massive(ticker, *overview)
 
         # Act
-        with patch("hvcwatch.notification.get_ticker_type", return_value=ticker_type):
-            notifier.send("AAPL", "daily")
+        DiscordNotifier(webhook_url=WEBHOOK_URL).send(ticker, timeframe)
 
         # Assert
-        mock_embed_class.assert_called_once_with(
-            title="AAPL",
-            description=expected_description,
-            color="03b2f8",
-        )
+        (payload,) = posts_to(http_mock, WEBHOOK_URL)
+        embed = only_embed(payload)
+        # 🔎 The library adds null keys (proxy_url, height, ...), so compare what users see
+        assert {
+            "title": embed["title"],
+            "description": embed["description"],
+            "color": embed["color"],
+            "footer": embed["footer"]["text"],
+            "image": embed["image"]["url"],
+            "thumbnail": embed["thumbnail"]["url"],
+        } == {
+            "title": ticker,
+            "description": description,
+            "color": EMBED_COLOR,
+            "footer": FOOTER,
+            "image": settings.transparent_png,
+            "thumbnail": f"https://static.stocktitan.net/company-logo/{ticker.lower()}.webp",
+        }
+        assert datetime.fromisoformat(embed["timestamp"])
 
-    @pytest.mark.parametrize("status_code", [200, 201, 204, 400, 500])
-    def test_send_various_response_codes(self, mock_settings, status_code):
-        """Test Discord notification with various HTTP response codes."""
-        with (
-            patch("hvcwatch.notification.DiscordWebhook") as mock_webhook_class,
-            patch("hvcwatch.notification.DiscordEmbed"),
-        ):
-            mock_webhook = Mock()
-            mock_webhook_class.return_value = mock_webhook
-
-            # Mock response with different status codes
-            mock_response = Mock()
-            mock_response.status_code = status_code
-            mock_webhook.execute.return_value = mock_response
-
-            notifier = DiscordNotifier(
-                webhook_url="https://discord.com/api/webhooks/test"
-            )
-            notifier.send("AAPL", "daily")
-
-            # Just verify execution completes without error
-            mock_webhook.execute.assert_called_once()
-
-    @pytest.mark.parametrize(
-        "ticker,timeframe",
-        [
-            ("AAPL", "daily"),
-            ("TSLA", "weekly"),
-            ("NVDA", "monthly"),
-            ("MSFT", "daily"),
-            ("GOOGL", "weekly"),
-        ],
-    )
-    def test_send_various_tickers_and_timeframes(
-        self, mock_settings, mock_discord_webhook, ticker, timeframe
+    def test_send_uses_custom_transparent_png(
+        self, http_mock, fake_discord, override_settings
     ):
-        """Test Discord notification with various tickers and timeframes."""
-        mock_webhook_class, mock_embed_class, mock_webhook, mock_embed = (
-            mock_discord_webhook
-        )
+        """🖼️ The embed image comes from settings, not a hardcoded URL."""
+        # Arrange
+        fake_discord()
+        override_settings(transparent_png="https://example.com/clear.png")
 
-        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
-        notifier.send(ticker, timeframe)
+        # Act
+        DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
 
-        # Verify webhook was executed
-        mock_webhook.execute.assert_called_once()
+        # Assert
+        (payload,) = posts_to(http_mock, WEBHOOK_URL)
+        assert only_embed(payload)["image"]["url"] == "https://example.com/clear.png"
+
+    @pytest.mark.parametrize("status", [400, 500])
+    def test_send_non_2xx_with_json_body_does_not_raise(
+        self, http_mock, fake_discord, status
+    ):
+        """
+        📌 Pins today's behavior for a non-2xx reply, nothing more.
+
+        TODO(#117): the failure policy is undecided. Today send() returns
+        normally, so the caller counts the alert as sent. When #117 is decided,
+        replace this test with one that asserts the chosen policy.
+        """
+        # Arrange
+        fake_discord(status=status, json={"message": "nope"})
+
+        # Act (no exception is the observable behavior)
+        DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
+
+        # Assert
+        assert len(posts_to(http_mock, WEBHOOK_URL)) == 1
+
+    def test_send_connection_error_propagates(self, http_mock, fake_discord):
+        """🔌 A network failure reaches the caller (notify_all_platforms handles it)."""
+        # Arrange
+        fake_discord(body=requests.ConnectionError("boom"))
+
+        # Act / Assert
+        with pytest.raises(requests.ConnectionError):
+            DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
 
 
 class TestNotifyAllPlatforms:
-    """Test notify_all_platforms orchestrator function."""
+    """notify_all_platforms: the real notifier, one POST per configured URL."""
 
-    @patch("hvcwatch.notification.settings")
-    @patch("hvcwatch.notification.DiscordNotifier")
-    def test_notify_all_platforms_success(self, mock_notifier_class, mock_settings):
-        """Test successful notification to all platforms."""
-        # Mock settings to return a single webhook URL
-        mock_settings.get_discord_webhook_urls.return_value = [
-            "https://discord.com/api/webhooks/test"
-        ]
-
-        mock_notifier = Mock()
-        mock_notifier_class.return_value = mock_notifier
-
-        notify_all_platforms("AAPL", "daily")
-
-        # Verify Discord notifier was created and called
-        mock_notifier_class.assert_called_once_with(
-            webhook_url="https://discord.com/api/webhooks/test"
-        )
-        mock_notifier.send.assert_called_once_with("AAPL", "daily")
-
-    @patch("hvcwatch.notification.settings")
-    @patch("hvcwatch.notification.DiscordNotifier")
-    def test_notify_all_platforms_with_timeframe(
-        self, mock_notifier_class, mock_settings
+    @pytest.mark.parametrize(
+        ("timeframe", "expected_line"),
+        [
+            ("daily", "**Timeframe:** Daily"),
+            ("weekly", "**Timeframe:** Weekly"),
+            ("monthly", "**Timeframe:** Monthly 🔥"),
+            (None, "**Timeframe:** Daily"),  # 🗓️ No argument means daily
+        ],
+        ids=["daily", "weekly", "monthly", "default-is-daily"],
+    )
+    def test_posts_once_with_timeframe(
+        self, http_mock, fake_discord, massive, timeframe, expected_line
     ):
-        """Test notification with different timeframes."""
-        mock_settings.get_discord_webhook_urls.return_value = [
-            "https://discord.com/api/webhooks/test"
-        ]
+        """✅ One POST to the configured URL, with the right timeframe and name."""
+        # Arrange
+        fake_discord()
+        massive("AAPL", "Apple Inc.", "CS")
+        args = () if timeframe is None else (timeframe,)
 
-        mock_notifier = Mock()
-        mock_notifier_class.return_value = mock_notifier
+        # Act
+        notify_all_platforms("AAPL", *args)
 
-        notify_all_platforms("TSLA", "weekly")
+        # Assert
+        (payload,) = posts_to(http_mock, WEBHOOK_URL)
+        embed = only_embed(payload)
+        assert embed["title"] == "AAPL"
+        assert embed["description"] == f"**Apple Inc.**\n**Type:** CS\n{expected_line}"
 
-        mock_notifier.send.assert_called_once_with("TSLA", "weekly")
-
-    @patch("hvcwatch.notification.settings")
-    @patch("hvcwatch.notification.DiscordNotifier")
-    def test_notify_all_platforms_monthly_with_fire(
-        self, mock_notifier_class, mock_settings
+    def test_posts_once_to_each_configured_url(
+        self, http_mock, fake_discord, override_settings
     ):
-        """Test monthly notification passes correct timeframe."""
-        mock_settings.get_discord_webhook_urls.return_value = [
-            "https://discord.com/api/webhooks/test"
-        ]
+        """📬 Every configured URL gets exactly one POST with the same embed."""
+        # Arrange
+        override_settings(discord_webhook_urls=f"{SECOND_URL}, {WEBHOOK_URL}")
+        fake_discord(WEBHOOK_URL)
+        fake_discord(SECOND_URL)
 
-        mock_notifier = Mock()
-        mock_notifier_class.return_value = mock_notifier
-
-        notify_all_platforms("NVDA", "monthly")
-
-        mock_notifier.send.assert_called_once_with("NVDA", "monthly")
-
-    @patch("hvcwatch.notification.settings")
-    @patch("hvcwatch.notification.DiscordNotifier")
-    def test_notify_all_platforms_default_timeframe(
-        self, mock_notifier_class, mock_settings
-    ):
-        """Test that default timeframe is 'daily'."""
-        mock_settings.get_discord_webhook_urls.return_value = [
-            "https://discord.com/api/webhooks/test"
-        ]
-
-        mock_notifier = Mock()
-        mock_notifier_class.return_value = mock_notifier
-
-        # Call without timeframe argument
-        notify_all_platforms("AAPL")
-
-        mock_notifier.send.assert_called_once_with("AAPL", "daily")
-
-    @patch("hvcwatch.notification.settings")
-    @patch("hvcwatch.notification.DiscordNotifier")
-    def test_notify_all_platforms_send_error(self, mock_notifier_class, mock_settings):
-        """Test error handling when sending notification fails."""
-        # Mock settings to return a single webhook URL
-        mock_settings.get_discord_webhook_urls.return_value = [
-            "https://discord.com/api/webhooks/test"
-        ]
-
-        mock_notifier = Mock()
-        mock_notifier.send.side_effect = Exception("Webhook error")
-        mock_notifier_class.return_value = mock_notifier
-
-        # Should not raise - error is caught and logged
-        notify_all_platforms("AAPL", "daily")
-
-        # Verify the send was attempted
-        mock_notifier.send.assert_called_once_with("AAPL", "daily")
-
-    @patch("hvcwatch.notification.settings")
-    @patch("hvcwatch.notification.DiscordNotifier")
-    @pytest.mark.parametrize("ticker", ["TSLA", "MSFT", "GOOGL", "AMZN"])
-    def test_notify_all_platforms_various_tickers(
-        self, mock_notifier_class, mock_settings, ticker
-    ):
-        """Test notify_all_platforms with various ticker symbols."""
-        # Mock settings to return a single webhook URL
-        mock_settings.get_discord_webhook_urls.return_value = [
-            "https://discord.com/api/webhooks/test"
-        ]
-
-        mock_notifier = Mock()
-        mock_notifier_class.return_value = mock_notifier
-
-        notify_all_platforms(ticker, "daily")
-
-        # Verify notification was sent with correct ticker
-        mock_notifier.send.assert_called_once_with(ticker, "daily")
-
-    @patch("hvcwatch.notification.settings")
-    @patch("hvcwatch.notification.DiscordNotifier")
-    def test_notify_all_platforms_no_discord_config(
-        self, mock_notifier_class, mock_settings
-    ):
-        """Test graceful handling when Discord is not configured."""
-        mock_settings.get_discord_webhook_urls.return_value = []  # No Discord configured
-
-        notify_all_platforms("AAPL", "daily")
-
-        # Verify Discord notifier was NOT created
-        mock_notifier_class.assert_not_called()
-
-    @patch("hvcwatch.notification.settings")
-    @patch("hvcwatch.notification.DiscordNotifier")
-    def test_notify_all_platforms_multiple_webhooks(
-        self, mock_notifier_class, mock_settings
-    ):
-        """Test sending to multiple webhook URLs."""
-        mock_settings.get_discord_webhook_urls.return_value = [
-            "https://discord.com/api/webhooks/test1",
-            "https://discord.com/api/webhooks/test2",
-        ]
-
-        mock_notifier = Mock()
-        mock_notifier_class.return_value = mock_notifier
-
+        # Act
         notify_all_platforms("AAPL", "weekly")
 
-        # Verify notifier was created twice (once per webhook)
-        assert mock_notifier_class.call_count == 2
-        assert mock_notifier.send.call_count == 2
+        # Assert
+        first = posts_to(http_mock, WEBHOOK_URL)
+        second = posts_to(http_mock, SECOND_URL)
+        assert (
+            len(first) == len(second) == 1
+        )  # 🧹 The duplicate URL is not posted twice
+        assert only_embed(first[0])["description"].endswith("**Timeframe:** Weekly")
+        assert only_embed(first[0])["title"] == only_embed(second[0])["title"] == "AAPL"
 
-        # Both calls should have same ticker and timeframe
-        for call in mock_notifier.send.call_args_list:
-            assert call[0] == ("AAPL", "weekly")
+    def test_connection_error_is_logged_and_next_url_still_posts(
+        self, http_mock, fake_discord, override_settings, caplog
+    ):
+        """🛡️ One unreachable URL is logged at ERROR and does not stop the others."""
+        # Arrange
+        override_settings(discord_webhook_urls=SECOND_URL)
+        fake_discord(WEBHOOK_URL, body=requests.ConnectionError("boom"))
+        fake_discord(SECOND_URL)
+
+        # Act
+        with caplog.at_level(logging.ERROR, logger="hvcwatch.notification"):
+            notify_all_platforms("AAPL", "daily")  # must not raise
+
+        # Assert
+        assert len(posts_to(http_mock, SECOND_URL)) == 1
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1
+        assert "Failed to send notification" in errors[0].getMessage()
+        assert "boom" in errors[0].getMessage()
+
+    def test_empty_json_body_is_logged_as_failure(self, fake_discord, caplog):
+        """
+        🕳️ An empty 200 body makes execute raise JSONDecodeError, which is logged.
+
+        Guards the fake itself: a 200 with no JSON body would look like success
+        in a "one POST" check while the real send had failed.
+        """
+        # Arrange
+        fake_discord(body="")
+
+        # Act
+        with caplog.at_level(logging.ERROR, logger="hvcwatch.notification"):
+            notify_all_platforms("AAPL", "daily")
+
+        # Assert
+        assert "Failed to send notification" in caplog.text
+
+    def test_no_urls_makes_no_http_calls_and_warns(
+        self, http_mock, monkeypatch, caplog
+    ):
+        """
+        📭 With no webhook URLs, nothing is sent and a warning says so.
+
+        Settings validation rejects a config with no URL, so the empty list is
+        injected directly instead of building a Settings that has none.
+        """
+        # Arrange
+        monkeypatch.setattr(Settings, "get_discord_webhook_urls", lambda self: [])
+
+        # Act
+        with caplog.at_level(logging.WARNING, logger="hvcwatch.notification"):
+            notify_all_platforms("AAPL", "daily")
+
+        # Assert
+        assert len(http_mock.calls) == 0
+        assert "No notifications sent" in caplog.text
