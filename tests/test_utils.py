@@ -1,3 +1,4 @@
+import json
 import pytest
 import requests
 from unittest.mock import Mock, patch
@@ -10,6 +11,7 @@ from hvcwatch.utils import (
     extract_tickers,
     extract_timeframe,
     get_company_name,
+    get_ticker_type,
     is_market_hours_or_near,
     _get_nyse_calendar,
 )
@@ -235,6 +237,9 @@ class TestIsMarketHoursOrNear:
 
 
 OK_BODY = b'{"status":"OK","results":{"name":"Apple Inc.","ticker":"AAPL"}}'
+OK_BODY_WITH_TYPE = (
+    b'{"status":"OK","results":{"name":"Apple Inc.","ticker":"AAPL","type":"CS"}}'
+)
 MASSIVE_AAPL_URL = "https://api.massive.com/v3/reference/tickers/AAPL"
 
 
@@ -246,21 +251,23 @@ def make_response(status_code: int, body: bytes = b"") -> requests.Response:
     return response
 
 
+@pytest.fixture(autouse=True)
+def clear_cache():
+    """🧹 Clear the per-ticker cache before and after each test."""
+    utils._lookup_ticker_overview.cache_clear()
+    yield
+    utils._lookup_ticker_overview.cache_clear()
+
+
+@pytest.fixture
+def api_key():
+    """🔑 Configure a fake Massive API key."""
+    with patch("hvcwatch.utils.settings", Mock(massive_api_key="test-key")):
+        yield
+
+
 class TestGetCompanyName:
     """Test cases for get_company_name using the live Massive API."""
-
-    @pytest.fixture(autouse=True)
-    def clear_cache(self):
-        """🧹 Clear the per-ticker cache before and after each test."""
-        utils._lookup_company_name.cache_clear()
-        yield
-        utils._lookup_company_name.cache_clear()
-
-    @pytest.fixture
-    def api_key(self):
-        """🔑 Configure a fake Massive API key."""
-        with patch("hvcwatch.utils.settings", Mock(massive_api_key="test-key")):
-            yield
 
     def test_returns_name_from_massive(self, api_key):
         """✅ A 200 response returns results.name."""
@@ -285,6 +292,7 @@ class TestGetCompanyName:
         url = call.args[0] if call.args else call.kwargs["url"]
         assert url == MASSIVE_AAPL_URL
         assert call.kwargs["headers"] == {"Authorization": "Bearer test-key"}
+        assert "params" not in call.kwargs
         assert call.kwargs["timeout"] == 10
 
     def test_unknown_ticker_404_returns_none(self, api_key):
@@ -348,3 +356,81 @@ class TestGetCompanyName:
             assert get_company_name("AAPL") == "Apple Inc."
             assert get_company_name("aapl") == "Apple Inc."
         assert get.call_count == 1
+
+
+class TestGetTickerType:
+    """Test cases for get_ticker_type, which shares one overview call with get_company_name."""
+
+    @pytest.mark.parametrize("code", ["CS", "ETF", "ADRC"])
+    def test_returns_type_code(self, api_key, code):
+        """✅ A 200 response returns results.type as Massive sends it."""
+        # Arrange
+        body = json.dumps({
+            "status": "OK",
+            "results": {"name": "Apple Inc.", "type": code},
+        }).encode()
+
+        # Act / Assert
+        with patch(
+            "hvcwatch.utils.requests.get", return_value=make_response(200, body)
+        ):
+            assert get_ticker_type("AAPL") == code
+
+    def test_name_and_type_share_one_http_call(self, api_key):
+        """✅ Name and type for one ticker cost one HTTP call, and both come from it."""
+        # Arrange
+        with patch(
+            "hvcwatch.utils.requests.get",
+            return_value=make_response(200, OK_BODY_WITH_TYPE),
+        ) as get:
+            # Act
+            name = get_company_name("AAPL")
+            ticker_type = get_ticker_type("aapl")
+
+        # Assert
+        assert (name, ticker_type) == ("Apple Inc.", "CS")
+        get.assert_called_once()
+
+    def test_missing_api_key_skips_http_call(self):
+        """✅ Without a key, no HTTP call is made and the type is None."""
+        with (
+            patch("hvcwatch.utils.settings", Mock(massive_api_key=None)),
+            patch("hvcwatch.utils.requests.get") as get,
+        ):
+            assert get_ticker_type("AAPL") is None
+        get.assert_not_called()
+
+    def test_missing_type_keeps_company_name(self, api_key):
+        """✅ A 200 response without results.type has no type but still returns the name."""
+        body = b'{"status":"OK","results":{"name":"Apple Inc.","ticker":"AAPL"}}'
+        with patch(
+            "hvcwatch.utils.requests.get", return_value=make_response(200, body)
+        ):
+            assert get_company_name("AAPL") == "Apple Inc."
+            assert get_ticker_type("AAPL") is None
+
+    def test_unknown_ticker_404_is_none_for_both_and_cached(self, api_key):
+        """✅ A 404 gives None for name and type, and the empty result is cached."""
+        with patch(
+            "hvcwatch.utils.requests.get", return_value=make_response(404)
+        ) as get:
+            assert get_company_name("ZZZZ") is None
+            assert get_ticker_type("ZZZZ") is None
+        get.assert_called_once()
+
+    def test_transient_failures_are_none_for_both_and_not_cached(self, api_key):
+        """✅ A 500 and a timeout each return None, and the next call retries the API."""
+        # Arrange: 500, then timeout, then success
+        responses = [
+            make_response(500),
+            requests.Timeout("timed out"),
+            make_response(200, OK_BODY_WITH_TYPE),
+        ]
+
+        # Act / Assert
+        with patch("hvcwatch.utils.requests.get", side_effect=responses) as get:
+            assert get_company_name("AAPL") is None
+            assert get_ticker_type("AAPL") is None
+            assert get_company_name("AAPL") == "Apple Inc."
+            assert get_ticker_type("AAPL") == "CS"
+        assert get.call_count == 3

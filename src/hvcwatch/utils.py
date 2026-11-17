@@ -2,6 +2,7 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 from functools import cache
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
@@ -16,20 +17,29 @@ MASSIVE_TICKER_URL = "https://api.massive.com/v3/reference/tickers/{ticker}"
 MASSIVE_TIMEOUT_SECONDS = 10
 
 
+class TickerOverview(NamedTuple):
+    """📇 The fields we use from a Massive ticker overview. None means unknown."""
+
+    name: str | None
+    type: str | None
+
+
 @cache
-def _lookup_company_name(ticker: str) -> str | None:
+def _lookup_ticker_overview(ticker: str) -> TickerOverview:
     """
-    Fetch a company name from the Massive ticker overview endpoint.
+    Fetch the name and type for a ticker from the Massive ticker overview endpoint.
 
     Results are cached per ticker, so each symbol costs one HTTP call per
-    process. A 404 (unknown ticker) is cached as None. Any other failure
-    raises, so transient errors are never cached and the next call retries.
+    process, and company name and ticker type share that call. A 404 (unknown
+    ticker) is cached as an empty overview. Any other failure raises, so
+    transient errors are never cached and the next call retries.
 
     Args:
         ticker: Uppercase ticker symbol (e.g., "AAPL")
 
     Returns:
-        Company name, or None if Massive does not know the ticker
+        TickerOverview with name and type. Both are None for a 404. A missing
+        or empty type is None, and the name is still returned.
 
     Raises:
         requests.RequestException: Network error, timeout, or non-2xx status
@@ -44,9 +54,41 @@ def _lookup_company_name(ticker: str) -> str | None:
     )
     if response.status_code == 404:
         logger.info("Ticker not found on Massive ticker=%s", ticker)
-        return None
+        return TickerOverview(name=None, type=None)
     response.raise_for_status()
-    return response.json()["results"]["name"]
+    results = response.json()["results"]
+    # 🛟 Type is optional: a missing type must not throw away a valid name
+    return TickerOverview(name=results["name"], type=results.get("type") or None)
+
+
+def _fetch_overview(ticker: str, lookup: str) -> TickerOverview | None:
+    """
+    Return the Massive overview for a ticker, or None if it cannot be fetched.
+
+    Never raises. Name and type are optional in notifications, so a missing
+    API key or any failure is logged and returns None.
+
+    Args:
+        ticker: Stock ticker symbol (e.g., "AAPL")
+        lookup: Label for log lines, such as "company name" or "ticker type"
+
+    Returns:
+        TickerOverview if the lookup worked, None otherwise
+    """
+    if not settings.massive_api_key:
+        logger.warning("Massive API key not set, skipping %s lookup", lookup)
+        return None
+
+    try:
+        return _lookup_ticker_overview(ticker.upper())
+    except Exception as e:  # 🛡️ Broad catch: a notification must still be sent
+        logger.warning(
+            "%s lookup failed ticker=%s error=%s",
+            lookup.capitalize(),
+            ticker,
+            str(e),
+        )
+        return None
 
 
 def get_company_name(ticker: str) -> str | None:
@@ -62,19 +104,27 @@ def get_company_name(ticker: str) -> str | None:
     Returns:
         Company name if found (e.g., "Apple Inc."), None otherwise
     """
-    if not settings.massive_api_key:
-        logger.warning("Massive API key not set, skipping company name lookup")
-        return None
+    overview = _fetch_overview(ticker, "company name")
+    return None if overview is None else overview.name
 
-    try:
-        return _lookup_company_name(ticker.upper())
-    except Exception as e:  # 🛡️ Broad catch: a notification must still be sent
-        logger.warning(
-            "Company name lookup failed ticker=%s error=%s",
-            ticker,
-            str(e),
-        )
-        return None
+
+def get_ticker_type(ticker: str) -> str | None:
+    """
+    Look up the security type code for a ticker using the Massive API.
+
+    Codes are returned as Massive sends them, such as "CS" (common stock),
+    "ETF", or "ADRC". The type shares the cached overview lookup with
+    get_company_name, so each ticker costs one HTTP call per process. Never raises: the type is
+    optional in notifications, so any failure is logged and returns None.
+
+    Args:
+        ticker: Stock ticker symbol (e.g., "AAPL")
+
+    Returns:
+        Type code if found (e.g., "CS"), None otherwise
+    """
+    overview = _fetch_overview(ticker, "ticker type")
+    return None if overview is None else overview.type
 
 
 def extract_tickers(subject: str) -> list[str]:

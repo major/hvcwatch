@@ -27,6 +27,13 @@ def mock_company_names():
         yield
 
 
+# Mock get_ticker_type so no test hits the network and existing descriptions stay the same
+@pytest.fixture(autouse=True)
+def mock_ticker_types():
+    with patch("hvcwatch.notification.get_ticker_type", return_value=None):
+        yield
+
+
 @pytest.fixture
 def mock_settings():
     """Mock settings with Discord webhook URL and transparent PNG."""
@@ -131,6 +138,33 @@ class TestDiscordNotifierSend:
         mock_embed_class.assert_called_once_with(
             title="NVDA",
             description="**NVIDIA CORP**\n**Timeframe:** Monthly 🔥",
+            color="03b2f8",
+        )
+
+    @pytest.mark.parametrize(
+        ("ticker_type", "expected_description"),
+        [
+            ("ETF", "**Apple Inc.**\n**Type:** ETF\n**Timeframe:** Daily"),
+            (None, "**Apple Inc.**\n**Timeframe:** Daily"),
+        ],
+        ids=["type-shown", "type-omitted"],
+    )
+    def test_send_type_line_between_company_and_timeframe(
+        self, mock_settings, mock_discord_webhook, ticker_type, expected_description
+    ):
+        """✅ A known ticker type gets its own line; a None type adds no line."""
+        # Arrange
+        _, mock_embed_class, _, _ = mock_discord_webhook
+        notifier = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/test")
+
+        # Act
+        with patch("hvcwatch.notification.get_ticker_type", return_value=ticker_type):
+            notifier.send("AAPL", "daily")
+
+        # Assert
+        mock_embed_class.assert_called_once_with(
+            title="AAPL",
+            description=expected_description,
             color="03b2f8",
         )
 
