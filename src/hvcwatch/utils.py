@@ -9,7 +9,7 @@ import exchange_calendars as xcals
 import httpx2
 from exchange_calendars.errors import DateOutOfBounds
 
-from hvcwatch.config import settings
+from hvcwatch import config
 from hvcwatch.types import Timeframe
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ def _lookup_ticker_overview(ticker: str) -> TickerOverview:
     # 🔐 The key goes in the header, never the URL, so it stays out of logs
     response = httpx2.get(
         MASSIVE_TICKER_URL.format(ticker=ticker),
-        headers={"Authorization": f"Bearer {settings.massive_api_key}"},
+        headers={"Authorization": f"Bearer {config.get_settings().massive_api_key}"},
         timeout=MASSIVE_TIMEOUT_SECONDS,
     )
     if response.status_code == 404:
@@ -76,7 +76,7 @@ def _fetch_overview(ticker: str, lookup: str) -> TickerOverview | None:
     Returns:
         TickerOverview if the lookup worked, None otherwise
     """
-    if not settings.massive_api_key:
+    if not config.get_settings().massive_api_key:
         logger.warning("Massive API key not set, skipping %s lookup", lookup)
         return None
 

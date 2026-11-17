@@ -6,7 +6,7 @@ from typing import Protocol
 import requests
 from discord_webhook import DiscordEmbed, DiscordWebhook
 
-from hvcwatch.config import settings
+from hvcwatch import config
 from hvcwatch.types import Timeframe
 from hvcwatch.utils import get_company_name, get_ticker_type
 
@@ -154,7 +154,7 @@ class DiscordNotifier:
         logo_url = f"https://static.stocktitan.net/company-logo/{ticker.lower()}.webp"
         embed.set_thumbnail(url=logo_url)
         embed.set_footer(text="HVC Watch · Major's Bots")
-        embed.set_image(url=settings.transparent_png)
+        embed.set_image(url=config.get_settings().transparent_png)
         embed.set_timestamp()
         webhook.add_embed(embed)
         self._deliver(webhook)
@@ -227,7 +227,7 @@ def notify_all_platforms(ticker: str, timeframe: Timeframe = "daily") -> int:
     # Track how many webhooks accepted the alert
     notifications_sent = 0
 
-    discord_webhook_urls = settings.get_discord_webhook_urls()
+    discord_webhook_urls = config.get_settings().get_discord_webhook_urls()
     if not discord_webhook_urls:
         logger.warning("No Discord webhooks configured, nothing sent ticker=%s", ticker)
         return 0

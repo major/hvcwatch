@@ -1,6 +1,6 @@
 import logging
 
-from hvcwatch.config import settings
+from hvcwatch import config
 from hvcwatch.email_monitor import connect_imap
 from hvcwatch.logging_config import setup_logging
 from hvcwatch.version import get_version_info
@@ -9,6 +9,12 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    """
+    🚀 Start the IMAP monitor.
+
+    Loads settings first, so missing config fails at startup, before logging starts.
+    """
+    settings = config.get_settings()
     setup_logging()
 
     version_info = get_version_info()
