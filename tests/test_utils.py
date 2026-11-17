@@ -1,12 +1,9 @@
-import json
 from datetime import UTC, date, datetime
-from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
 import requests
 
-from hvcwatch import utils
 from hvcwatch.utils import (
     _get_nyse_calendar,
     extract_tickers,
@@ -431,196 +428,267 @@ OK_BODY_WITH_TYPE = (
     b'{"status":"OK","results":{"name":"Apple Inc.","ticker":"AAPL","type":"CS"}}'
 )
 MASSIVE_AAPL_URL = "https://api.massive.com/v3/reference/tickers/AAPL"
+MASSIVE_ZZZZ_URL = "https://api.massive.com/v3/reference/tickers/ZZZZ"
 
 
-def make_response(status_code: int, body: bytes = b"") -> requests.Response:
-    """🧪 Build a real requests.Response so status and JSON handling match production."""
-    response = requests.Response()
-    response.status_code = status_code
-    response._content = body
-    return response
-
-
-@pytest.fixture(autouse=True)
-def clear_cache():
-    """🧹 Clear the per-ticker cache before and after each test."""
-    utils._lookup_ticker_overview.cache_clear()
-    yield
-    utils._lookup_ticker_overview.cache_clear()
+def warning_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """📜 Messages logged at WARNING level during the test."""
+    return [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
 
 
 @pytest.fixture
-def api_key():
+def api_key(override_settings):
     """🔑 Configure a fake Massive API key."""
-    with patch("hvcwatch.utils.settings", Mock(massive_api_key="test-key")):
-        yield
+    override_settings(massive_api_key="test-key")
 
 
 class TestGetCompanyName:
     """Test cases for get_company_name using the live Massive API."""
 
-    def test_returns_name_from_massive(self, api_key):
+    def test_returns_name_from_massive(self, api_key, http_mock):
         """✅ A 200 response returns results.name."""
         # Arrange
-        response = make_response(200, OK_BODY)
+        http_mock.get(MASSIVE_AAPL_URL, body=OK_BODY)
 
-        # Act / Assert
-        with patch("hvcwatch.utils.requests.get", return_value=response):
-            assert get_company_name("AAPL") == "Apple Inc."
-
-    def test_ticker_is_uppercased_and_bearer_header_sent(self, api_key):
-        """✅ The URL uses an uppercase ticker and the key goes in the header, not the URL."""
         # Act
-        with patch(
-            "hvcwatch.utils.requests.get", return_value=make_response(200, OK_BODY)
-        ) as get:
-            get_company_name("aapl")
+        name = get_company_name("AAPL")
 
         # Assert
-        get.assert_called_once()
-        call = get.call_args
-        url = call.args[0] if call.args else call.kwargs["url"]
-        assert url == MASSIVE_AAPL_URL
-        assert call.kwargs["headers"] == {"Authorization": "Bearer test-key"}
-        assert "params" not in call.kwargs
-        assert call.kwargs["timeout"] == 10
+        assert name == "Apple Inc."
 
-    def test_unknown_ticker_404_returns_none(self, api_key):
-        """✅ A 404 means the ticker is unknown, so the result is None."""
-        with patch("hvcwatch.utils.requests.get", return_value=make_response(404)):
-            assert get_company_name("ZZZZ") is None
+    def test_ticker_is_uppercased_and_bearer_header_sent(self, api_key, http_mock):
+        """✅ The URL uses an uppercase ticker and the key goes in the header, not the URL."""
+        # Arrange
+        http_mock.get(MASSIVE_AAPL_URL, body=OK_BODY)
 
-    @pytest.mark.parametrize("status_code", [500, 429])
-    def test_transient_error_returns_none_and_is_not_cached(self, api_key, status_code):
-        """✅ A 5xx or 429 returns None, and the next call retries the API."""
-        # Arrange: first call fails, second call succeeds
-        responses = [
-            make_response(status_code, OK_BODY),
-            make_response(200, OK_BODY),
-        ]
+        # Act
+        get_company_name("aapl")
 
-        # Act / Assert
-        with patch("hvcwatch.utils.requests.get", side_effect=responses) as get:
-            assert get_company_name("AAPL") is None
-            assert get_company_name("AAPL") == "Apple Inc."
-        assert get.call_count == 2
+        # Assert
+        assert len(http_mock.calls) == 1
+        request = http_mock.calls[0].request
+        assert request.url == MASSIVE_AAPL_URL
+        assert request.headers["Authorization"] == "Bearer test-key"
+        assert "test-key" not in request.url
+        assert request.req_kwargs["timeout"] == 10
+
+    def test_unknown_ticker_404_returns_none_and_is_cached(
+        self, api_key, http_mock, caplog
+    ):
+        """✅ A 404 returns None and is cached, so the second call sends no request."""
+        # Arrange
+        http_mock.get(MASSIVE_ZZZZ_URL, status=404)
+
+        # Act
+        with caplog.at_level("INFO", logger="hvcwatch.utils"):
+            first = get_company_name("ZZZZ")
+            second = get_company_name("ZZZZ")
+
+        # Assert
+        assert (first, second) == (None, None)
+        assert len(http_mock.calls) == 1
+        assert "Ticker not found on Massive ticker=ZZZZ" in caplog.messages
+
+    @pytest.mark.parametrize("status_code", [401, 403, 500, 429])
+    def test_http_error_returns_none_and_is_not_cached(
+        self, api_key, http_mock, status_code
+    ):
+        """✅ A 401, 403, 5xx, or 429 returns None, and the next call retries the API."""
+        # Arrange: first reply is an error, second reply succeeds
+        http_mock.get(MASSIVE_AAPL_URL, body=OK_BODY, status=status_code)
+        http_mock.get(MASSIVE_AAPL_URL, body=OK_BODY)
+
+        # Act
+        first = get_company_name("AAPL")
+        second = get_company_name("AAPL")
+
+        # Assert
+        assert first is None
+        assert second == "Apple Inc."
+        assert len(http_mock.calls) == 2
 
     @pytest.mark.parametrize(
         "error",
         [requests.Timeout("timed out"), requests.ConnectionError("no route")],
     )
-    def test_network_errors_return_none(self, api_key, error):
+    def test_network_errors_return_none(self, api_key, http_mock, error):
         """✅ Timeouts and connection errors never raise to the caller."""
-        with patch("hvcwatch.utils.requests.get", side_effect=error):
-            assert get_company_name("AAPL") is None
+        # Arrange
+        http_mock.get(MASSIVE_AAPL_URL, body=error)
+
+        # Act
+        name = get_company_name("AAPL")
+
+        # Assert
+        assert name is None
 
     @pytest.mark.parametrize(
         "body",
         [
             b"not json",
             b'{"status":"OK","results":{"ticker":"AAPL"}}',
+            b'{"status":"OK"}',
         ],
-        ids=["bad-json", "missing-name"],
+        ids=["bad-json", "missing-name", "missing-results"],
     )
-    def test_malformed_payload_returns_none(self, api_key, body):
-        """✅ Bad JSON or a missing results.name returns None."""
-        with patch(
-            "hvcwatch.utils.requests.get", return_value=make_response(200, body)
-        ):
-            assert get_company_name("AAPL") is None
+    def test_malformed_payload_returns_none_and_is_not_cached(
+        self, api_key, http_mock, body
+    ):
+        """✅ Bad JSON, or a missing results.name or results, returns None and is retried."""
+        # Arrange: first reply is malformed, second reply is valid
+        http_mock.get(MASSIVE_AAPL_URL, body=body)
+        http_mock.get(MASSIVE_AAPL_URL, body=OK_BODY)
 
-    def test_missing_api_key_skips_http_call(self):
-        """✅ Without a key, no HTTP call is made and the result is None."""
-        with (
-            patch("hvcwatch.utils.settings", Mock(massive_api_key=None)),
-            patch("hvcwatch.utils.requests.get") as get,
-        ):
-            assert get_company_name("AAPL") is None
-        get.assert_not_called()
+        # Act
+        first = get_company_name("AAPL")
+        second = get_company_name("AAPL")
 
-    def test_successful_lookup_is_cached(self, api_key):
+        # Assert
+        assert first is None
+        assert second == "Apple Inc."
+        assert len(http_mock.calls) == 2
+
+    def test_missing_api_key_skips_http_call(self, http_mock, caplog):
+        """✅ Without a key, no HTTP call is made, the result is None, and a warning is logged."""
+        # Act
+        with caplog.at_level("INFO", logger="hvcwatch.utils"):
+            name = get_company_name("AAPL")
+
+        # Assert
+        assert name is None
+        assert len(http_mock.calls) == 0
+        assert (
+            "Massive API key not set, skipping company name lookup"
+            in warning_messages(caplog)
+        )
+
+    def test_successful_lookup_is_cached(self, api_key, http_mock):
         """✅ A successful lookup costs one HTTP call, even for a different case."""
-        with patch(
-            "hvcwatch.utils.requests.get", return_value=make_response(200, OK_BODY)
-        ) as get:
-            assert get_company_name("AAPL") == "Apple Inc."
-            assert get_company_name("aapl") == "Apple Inc."
-        assert get.call_count == 1
+        # Arrange
+        http_mock.get(MASSIVE_AAPL_URL, body=OK_BODY)
+
+        # Act
+        first = get_company_name("AAPL")
+        second = get_company_name("aapl")
+
+        # Assert
+        assert (first, second) == ("Apple Inc.", "Apple Inc.")
+        assert len(http_mock.calls) == 1
 
 
 class TestGetTickerType:
     """Test cases for get_ticker_type, which shares one overview call with get_company_name."""
 
     @pytest.mark.parametrize("code", ["CS", "ETF", "ADRC"])
-    def test_returns_type_code(self, api_key, code):
+    def test_returns_type_code(self, api_key, http_mock, code):
         """✅ A 200 response returns results.type as Massive sends it."""
         # Arrange
-        body = json.dumps({
-            "status": "OK",
-            "results": {"name": "Apple Inc.", "type": code},
-        }).encode()
+        http_mock.get(
+            MASSIVE_AAPL_URL,
+            json={"status": "OK", "results": {"name": "Apple Inc.", "type": code}},
+        )
 
-        # Act / Assert
-        with patch(
-            "hvcwatch.utils.requests.get", return_value=make_response(200, body)
-        ):
-            assert get_ticker_type("AAPL") == code
+        # Act
+        ticker_type = get_ticker_type("AAPL")
 
-    def test_name_and_type_share_one_http_call(self, api_key):
+        # Assert
+        assert ticker_type == code
+
+    def test_name_and_type_share_one_http_call(self, api_key, http_mock):
         """✅ Name and type for one ticker cost one HTTP call, and both come from it."""
         # Arrange
-        with patch(
-            "hvcwatch.utils.requests.get",
-            return_value=make_response(200, OK_BODY_WITH_TYPE),
-        ) as get:
-            # Act
-            name = get_company_name("AAPL")
-            ticker_type = get_ticker_type("aapl")
+        http_mock.get(MASSIVE_AAPL_URL, body=OK_BODY_WITH_TYPE)
+
+        # Act
+        name = get_company_name("AAPL")
+        ticker_type = get_ticker_type("aapl")
 
         # Assert
         assert (name, ticker_type) == ("Apple Inc.", "CS")
-        get.assert_called_once()
+        assert len(http_mock.calls) == 1
 
-    def test_missing_api_key_skips_http_call(self):
-        """✅ Without a key, no HTTP call is made and the type is None."""
-        with (
-            patch("hvcwatch.utils.settings", Mock(massive_api_key=None)),
-            patch("hvcwatch.utils.requests.get") as get,
-        ):
-            assert get_ticker_type("AAPL") is None
-        get.assert_not_called()
+    def test_missing_api_key_skips_http_call(self, http_mock, caplog):
+        """✅ Without a key, no HTTP call is made, the type is None, and a warning is logged."""
+        # Act
+        with caplog.at_level("INFO", logger="hvcwatch.utils"):
+            ticker_type = get_ticker_type("AAPL")
 
-    def test_missing_type_keeps_company_name(self, api_key):
+        # Assert
+        assert ticker_type is None
+        assert len(http_mock.calls) == 0
+        assert (
+            "Massive API key not set, skipping ticker type lookup"
+            in warning_messages(caplog)
+        )
+
+    def test_missing_type_keeps_company_name(self, api_key, http_mock):
         """✅ A 200 response without results.type has no type but still returns the name."""
-        body = b'{"status":"OK","results":{"name":"Apple Inc.","ticker":"AAPL"}}'
-        with patch(
-            "hvcwatch.utils.requests.get", return_value=make_response(200, body)
-        ):
-            assert get_company_name("AAPL") == "Apple Inc."
-            assert get_ticker_type("AAPL") is None
+        # Arrange
+        http_mock.get(MASSIVE_AAPL_URL, body=OK_BODY)
 
-    def test_unknown_ticker_404_is_none_for_both_and_cached(self, api_key):
+        # Act
+        name = get_company_name("AAPL")
+        ticker_type = get_ticker_type("AAPL")
+
+        # Assert
+        assert name == "Apple Inc."
+        assert ticker_type is None
+
+    def test_unknown_ticker_404_is_none_for_both_and_cached(self, api_key, http_mock):
         """✅ A 404 gives None for name and type, and the empty result is cached."""
-        with patch(
-            "hvcwatch.utils.requests.get", return_value=make_response(404)
-        ) as get:
-            assert get_company_name("ZZZZ") is None
-            assert get_ticker_type("ZZZZ") is None
-        get.assert_called_once()
+        # Arrange
+        http_mock.get(MASSIVE_ZZZZ_URL, status=404)
 
-    def test_transient_failures_are_none_for_both_and_not_cached(self, api_key):
+        # Act
+        name = get_company_name("ZZZZ")
+        ticker_type = get_ticker_type("ZZZZ")
+
+        # Assert
+        assert (name, ticker_type) == (None, None)
+        assert len(http_mock.calls) == 1
+
+    def test_transient_failures_are_none_for_both_and_not_cached(
+        self, api_key, http_mock
+    ):
         """✅ A 500 and a timeout each return None, and the next call retries the API."""
         # Arrange: 500, then timeout, then success
-        responses = [
-            make_response(500),
-            requests.Timeout("timed out"),
-            make_response(200, OK_BODY_WITH_TYPE),
-        ]
+        http_mock.get(MASSIVE_AAPL_URL, body=OK_BODY, status=500)
+        http_mock.get(MASSIVE_AAPL_URL, body=requests.Timeout("timed out"))
+        http_mock.get(MASSIVE_AAPL_URL, body=OK_BODY_WITH_TYPE)
 
-        # Act / Assert
-        with patch("hvcwatch.utils.requests.get", side_effect=responses) as get:
-            assert get_company_name("AAPL") is None
-            assert get_ticker_type("AAPL") is None
-            assert get_company_name("AAPL") == "Apple Inc."
-            assert get_ticker_type("AAPL") == "CS"
-        assert get.call_count == 3
+        # Act
+        first_name = get_company_name("AAPL")
+        first_type = get_ticker_type("AAPL")
+        second_name = get_company_name("AAPL")
+        second_type = get_ticker_type("AAPL")
+
+        # Assert
+        assert (first_name, first_type) == (None, None)
+        assert (second_name, second_type) == ("Apple Inc.", "CS")
+        assert len(http_mock.calls) == 3
+
+
+@pytest.mark.parametrize(
+    "lookup, label",
+    [(get_company_name, "Company name"), (get_ticker_type, "Ticker type")],
+    ids=["company-name", "ticker-type"],
+)
+def test_server_error_logs_warning_without_leaking_key(
+    override_settings, http_mock, caplog, lookup, label
+):
+    """📜 A 500 logs a warning for the lookup, and the API key never reaches the log."""
+    # Arrange
+    override_settings(massive_api_key="test-key")
+    http_mock.get(MASSIVE_AAPL_URL, body=OK_BODY, status=500)
+
+    # Act
+    with caplog.at_level("INFO", logger="hvcwatch.utils"):
+        result = lookup("AAPL")
+
+    # Assert
+    assert result is None
+    assert any(
+        message.startswith(f"{label} lookup failed ticker=AAPL")
+        for message in warning_messages(caplog)
+    )
+    assert "test-key" not in caplog.text
