@@ -2,7 +2,7 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 from functools import cache
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
@@ -15,7 +15,13 @@ from hvcwatch.types import Timeframe
 logger = logging.getLogger(__name__)
 
 MASSIVE_TICKER_URL = "https://api.massive.com/v3/reference/tickers/{ticker}"
+MASSIVE_BARS_URL = (
+    "https://api.massive.com/v2/aggs/ticker/{ticker}/range/1/day/{start}/{end}"
+)
 MASSIVE_TIMEOUT_SECONDS = 10
+MARKET_STATS_LOOKBACK_DAYS = 45  # 📅 Calendar days, enough for 20 trading days
+MARKET_STATS_AVG_BARS = 20
+MARKET_TIMEZONE = ZoneInfo("America/New_York")  # 🗽 The US market clock
 
 
 class TickerOverview(NamedTuple):
@@ -126,6 +132,133 @@ def get_ticker_type(ticker: str) -> str | None:
     """
     overview = _fetch_overview(ticker, "ticker type")
     return None if overview is None else overview.type
+
+
+class MarketStats(NamedTuple):
+    """📈 Current price and 20-day averages from Massive daily bars. None means unknown."""
+
+    price: float | None
+    avg_volume: float | None
+    avg_dollar_volume: float | None
+
+
+def _today_eastern() -> date:
+    """
+    📅 Today's date on the US market clock (America/New_York).
+
+    Tests replace this function to pin the date.
+
+    Returns:
+        The current date in New York.
+    """
+    return datetime.now(MARKET_TIMEZONE).date()
+
+
+def _bar_date(bar: dict[str, Any]) -> date:
+    """
+    📅 The New York date of a daily bar.
+
+    Args:
+        bar: A Massive bar, where `t` is the session start in epoch milliseconds.
+
+    Returns:
+        The bar's date in New York, which can differ from UTC near midnight.
+    """
+    return datetime.fromtimestamp(bar["t"] / 1000, MARKET_TIMEZONE).date()
+
+
+def _market_stats_from_bars(bars: list[dict[str, Any]], today: date) -> MarketStats:
+    """
+    🧮 Turn newest-first daily bars into a price and 20-day averages.
+
+    The price is today's close when today's bar exists, else the newest close.
+    Today's bar may still be trading, so the averages skip it. They use the 20
+    newest other bars, and are None unless exactly 20 such bars exist. Fewer
+    than 20 never gives an average.
+
+    Args:
+        bars: Daily bars, newest first. Each has `c` (close), `v` (volume),
+            and `t` (session start in epoch milliseconds).
+        today: The current New York market date.
+
+    Returns:
+        MarketStats. Every field is None when there are no bars.
+    """
+    if not bars:
+        return MarketStats(price=None, avg_volume=None, avg_dollar_volume=None)
+    current = next((bar for bar in bars if _bar_date(bar) == today), None)
+    price = (current or bars[0])["c"]
+    # 🧩 On a weekend there is no current bar, so the 20 newest bars all count
+    window = [bar for bar in bars if bar is not current][:MARKET_STATS_AVG_BARS]
+    if len(window) < MARKET_STATS_AVG_BARS:
+        return MarketStats(price=price, avg_volume=None, avg_dollar_volume=None)
+    avg_volume = sum(bar["v"] for bar in window) / MARKET_STATS_AVG_BARS
+    avg_dollar_volume = (
+        sum(bar["c"] * bar["v"] for bar in window) / MARKET_STATS_AVG_BARS
+    )
+    return MarketStats(
+        price=price, avg_volume=avg_volume, avg_dollar_volume=avg_dollar_volume
+    )
+
+
+def _lookup_market_stats(ticker: str) -> MarketStats:
+    """
+    Fetch the last 45 calendar days of daily bars and derive the market stats.
+
+    Not cached, so the price is current. An empty or missing `results` is
+    valid and means no bars, which is not an error.
+
+    Args:
+        ticker: Uppercase ticker symbol (e.g., "AAPL")
+
+    Returns:
+        MarketStats for the ticker. Every field is None when there are no bars.
+
+    Raises:
+        httpx2.HTTPError: Network error, timeout, or non-2xx status
+        ValueError: Response body is not valid JSON
+        KeyError, TypeError: A bar is missing `c`, `v`, or `t`
+    """
+    today = _today_eastern()
+    start = today - timedelta(days=MARKET_STATS_LOOKBACK_DAYS)
+    # 🔐 The key goes in the header, never the URL, so it stays out of logs
+    response = httpx2.get(
+        MASSIVE_BARS_URL.format(
+            ticker=ticker, start=start.isoformat(), end=today.isoformat()
+        ),
+        params={"adjusted": "true", "sort": "desc", "limit": 21},  # 📦 20 + today
+        headers={"Authorization": f"Bearer {config.get_settings().massive_api_key}"},
+        timeout=MASSIVE_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    bars = response.json().get("results") or []
+    return _market_stats_from_bars(bars, today)
+
+
+def get_market_stats(ticker: str) -> MarketStats | None:
+    """
+    Look up the current price and 20-day average volumes using the Massive API.
+
+    Never raises. The stats are optional in notifications, so a missing API key
+    or any failure is logged and returns None. A reply with no bars is not a
+    failure: it returns MarketStats with every field None. Results are not
+    cached, so each call costs one HTTP request.
+
+    Args:
+        ticker: Stock ticker symbol (e.g., "AAPL")
+
+    Returns:
+        MarketStats if the lookup worked, None otherwise
+    """
+    if not config.get_settings().massive_api_key:
+        logger.warning("Massive API key not set, skipping market stats lookup")
+        return None
+
+    try:
+        return _lookup_market_stats(ticker.upper())
+    except Exception as e:  # 🛡️ Broad catch: a notification must still be sent
+        logger.warning("Market stats lookup failed ticker=%s error=%s", ticker, str(e))
+        return None
 
 
 def extract_tickers(subject: str) -> list[str]:

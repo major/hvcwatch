@@ -5,7 +5,9 @@ functions that a test calls directly.
 """
 
 import json
+from datetime import date, datetime, time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import responses
 
@@ -13,6 +15,7 @@ WEBHOOK_URL = (
     "https://discord.com/api/webhooks/test"  # 🔗 Matches the shared `settings`
 )
 SECOND_URL = "https://discord.com/api/webhooks/second"  # 🔗 A second, extra webhook
+NYC = ZoneInfo("America/New_York")  # 🗽 The market clock that stamps the bars
 
 
 class ScriptExhausted(Exception):
@@ -22,6 +25,12 @@ class ScriptExhausted(Exception):
     A monitor loop never ends on its own, so the fake raises this instead of
     returning empty results forever. Tests catch it with `pytest.raises`.
     """
+
+
+def daily_bar(day: date, close: float, volume: float) -> dict[str, Any]:
+    """📊 One Massive daily bar for `day`, stamped at midnight New York time."""
+    session_start = datetime.combine(day, time.min, tzinfo=NYC)
+    return {"c": close, "v": volume, "t": int(session_start.timestamp() * 1000)}
 
 
 def posts_to(http_mock: responses.RequestsMock, url: str) -> list[dict[str, Any]]:

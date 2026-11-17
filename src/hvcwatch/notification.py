@@ -8,7 +8,12 @@ from discord_webhook import DiscordEmbed, DiscordWebhook
 
 from hvcwatch import config
 from hvcwatch.types import Timeframe
-from hvcwatch.utils import get_company_name, get_ticker_type
+from hvcwatch.utils import (
+    MarketStats,
+    get_company_name,
+    get_market_stats,
+    get_ticker_type,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +35,70 @@ TIMEFRAME_COLORS = {
 
 class DiscordDeliveryError(Exception):
     """❌ Discord did not accept a webhook message, even after retries."""
+
+
+def format_price(price: float) -> str:
+    """
+    💲 Format a share price for an embed field.
+
+    Args:
+        price: The share price in dollars.
+
+    Returns:
+        `$1,234.56` (2 decimals) at $1 and up, or `$0.1234` (4 decimals) below $1.
+    """
+    if price >= 1:
+        return f"${price:,.2f}"
+    return f"${price:.4f}"
+
+
+def format_volume(value: float) -> str:
+    """
+    🔢 Format a share volume in compact form.
+
+    Args:
+        value: A number of shares.
+
+    Returns:
+        `1.3B`, `1.2M`, or `850.3K` (1 decimal). Below 1,000, a whole number.
+    """
+    for threshold, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if value >= threshold:
+            return f"{value / threshold:.1f}{suffix}"
+    return f"{value:.0f}"
+
+
+def format_dollar_volume(value: float) -> str:
+    """
+    💵 Format a dollar volume in compact form, with a $ prefix.
+
+    Args:
+        value: A number of dollars traded.
+
+    Returns:
+        The compact volume with a `$` prefix, such as `$57.6M`.
+    """
+    return f"${format_volume(value)}"
+
+
+def _market_stat_fields(stats: MarketStats | None) -> list[tuple[str, str]]:
+    """
+    📊 Embed fields for the market stats that are known, in display order.
+
+    Args:
+        stats: The market stats, or None if the lookup failed.
+
+    Returns:
+        (name, value) pairs. A None stat gets no field.
+    """
+    if stats is None:
+        return []
+    candidates = (
+        ("Price", stats.price, format_price),
+        ("Vol 20MA", stats.avg_volume, format_volume),
+        ("$Vol 20MA", stats.avg_dollar_volume, format_dollar_volume),
+    )
+    return [(name, fmt(value)) for name, value, fmt in candidates if value is not None]
 
 
 def _with_jitter(delay: float) -> float:
@@ -139,9 +208,10 @@ class DiscordNotifier:
             timeout=DISCORD_TIMEOUT_SECONDS,
         )
 
-        # Look up company name and ticker type (both optional, never block the alert)
+        # Look up company name, ticker type, and market stats (all optional, never block the alert)
         company_name = get_company_name(ticker)
         ticker_type = get_ticker_type(ticker)
+        market_stats = get_market_stats(ticker)
 
         # Add 🔥 emoji for monthly alerts
         emoji = " 🔥" if timeframe == "monthly" else ""
@@ -159,6 +229,8 @@ class DiscordNotifier:
             description=description,
             color=TIMEFRAME_COLORS[timeframe],
         )
+        for name, value in _market_stat_fields(market_stats):
+            embed.add_embed_field(name=name, value=value, inline=True)
         logo_url = f"https://static.stocktitan.net/company-logo/{ticker.lower()}.webp"
         embed.set_thumbnail(url=logo_url)
         embed.set_footer(text="HVC Watch · Major's Bots")

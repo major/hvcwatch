@@ -7,8 +7,9 @@ user would see.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
+import httpx2
 import pytest
 import requests
 
@@ -16,9 +17,12 @@ from hvcwatch.config import Settings
 from hvcwatch.notification import (
     DiscordDeliveryError,
     DiscordNotifier,
+    format_dollar_volume,
+    format_price,
+    format_volume,
     notify_all_platforms,
 )
-from tests.helpers import SECOND_URL, WEBHOOK_URL, only_embed, posts_to
+from tests.helpers import SECOND_URL, WEBHOOK_URL, daily_bar, only_embed, posts_to
 
 FOOTER = "HVC Watch · Major's Bots"
 
@@ -346,3 +350,119 @@ class TestNotifyAllPlatforms:
         assert len(http_mock.calls) == 0
         assert "No Discord webhooks configured, nothing sent" in caplog.text
         assert "No Discord notification delivered" not in caplog.text
+
+
+class TestMarketStatsFields:
+    """DiscordNotifier.send: market stats as inline embed fields, when known."""
+
+    def test_stats_add_three_inline_fields_in_order(
+        self, http_mock, fake_discord, massive, massive_bars, frozen_today
+    ):
+        """📊 Price, Vol 20MA, and $Vol 20MA are added as inline fields, in that order."""
+        # Arrange: price 48.12 today, and 20 prior days at 48.00 on 1.2M shares
+        fake_discord()
+        massive("AAPL", "Apple Inc.", "CS")
+        today_bar = daily_bar(frozen_today, close=48.12, volume=500)
+        prior = [
+            daily_bar(frozen_today - timedelta(days=k), close=48.00, volume=1_200_000)
+            for k in range(1, 21)
+        ]
+        massive_bars([today_bar, *prior])
+
+        # Act
+        DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
+
+        # Assert
+        (payload,) = posts_to(http_mock, WEBHOOK_URL)
+        assert only_embed(payload)["fields"] == [
+            {"name": "Price", "value": "$48.12", "inline": True},
+            {"name": "Vol 20MA", "value": "1.2M", "inline": True},
+            {"name": "$Vol 20MA", "value": "$57.6M", "inline": True},
+        ]
+
+    def test_price_only_adds_only_the_price_field(
+        self, http_mock, fake_discord, massive, massive_bars, frozen_today
+    ):
+        """📊 With a price but fewer than 20 prior bars, the embed gets the Price field only."""
+        # Arrange
+        fake_discord()
+        massive("AAPL", "Apple Inc.", "CS")
+        massive_bars([daily_bar(frozen_today, close=48.12, volume=500)])
+
+        # Act
+        DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
+
+        # Assert
+        (payload,) = posts_to(http_mock, WEBHOOK_URL)
+        assert only_embed(payload)["fields"] == [
+            {"name": "Price", "value": "$48.12", "inline": True},
+        ]
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            pytest.param(
+                {"error": httpx2.TimeoutException("timed out")}, id="lookup-failed"
+            ),
+            pytest.param({"body": b'{"status":"OK","results":[]}'}, id="no-bars"),
+        ],
+    )
+    def test_missing_stats_add_no_fields_and_still_send(
+        self, http_mock, fake_discord, massive, massive_bars, reply
+    ):
+        """🛟 A failed or empty stats lookup adds no fields, and the alert still goes out."""
+        # Arrange
+        fake_discord()
+        massive("AAPL", "Apple Inc.", "CS")
+        massive_bars(**reply)
+
+        # Act
+        DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
+
+        # Assert
+        (payload,) = posts_to(http_mock, WEBHOOK_URL)
+        assert not only_embed(payload).get("fields")
+
+
+@pytest.mark.parametrize(
+    ("price", "text"),
+    [
+        (1234.56, "$1,234.56"),
+        (48.12, "$48.12"),
+        (1.0, "$1.00"),
+        (0.5, "$0.5000"),
+        (0.1234, "$0.1234"),
+    ],
+)
+def test_format_price_uses_two_decimals_at_one_dollar_and_up(price, text):
+    """💲 Prices of $1 and up get 2 decimals and thousands separators. Under $1 gets 4."""
+    assert format_price(price) == text
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        (1_300_000_000, "1.3B"),
+        (1_200_000, "1.2M"),
+        (850_300, "850.3K"),
+        (1_000, "1.0K"),
+        (999, "999"),
+        (42, "42"),
+    ],
+)
+def test_format_volume_is_compact(value, text):
+    """🔢 Volume uses K, M, or B with one decimal. Below 1,000 it is a whole number."""
+    assert format_volume(value) == text
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        (57_600_000, "$57.6M"),
+        (2_500_000_000, "$2.5B"),
+        (42, "$42"),
+    ],
+)
+def test_format_dollar_volume_adds_dollar_sign_to_compact_form(value, text):
+    """💵 Dollar volume is the compact volume form with a $ prefix."""
+    assert format_dollar_volume(value) == text

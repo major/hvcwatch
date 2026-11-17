@@ -13,17 +13,23 @@ Opt-in fixtures (request them by name):
     db_path             The SQLite file used by the default `settings`.
     fake_discord        Factory that registers a Discord webhook that accepts POSTs.
     massive             Factory that fakes the Massive ticker overview endpoint.
+    massive_bars        Factory that sets the daily bars the Massive bars endpoint returns.
+    frozen_today        Pins the market date (America/New_York) to FROZEN_TODAY.
     fake_mailbox        Factory that swaps imap_tools MailBox for a scripted FakeMailBox.
     hvcwatch_logger     The hvcwatch logger, cleaned before and restored after the test.
 """
 
+import json
+import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
+from datetime import date
 from logging import Logger, getLogger
 from pathlib import Path
 from typing import Any, NamedTuple, Self
 from unittest.mock import MagicMock
 
+import httpx2
 import pytest
 import responses
 from imap_tools.message import MailMessage
@@ -34,6 +40,9 @@ from hvcwatch.config import Settings
 from hvcwatch.logging_config import LOGGER_NAME
 from hvcwatch.utils import MASSIVE_TICKER_URL
 from tests.helpers import WEBHOOK_URL, ScriptExhausted
+
+FROZEN_TODAY = date(2026, 11, 16)  # 🗓️ A Monday, so the Friday before is a real session
+MASSIVE_BARS_PATTERN = re.compile(r"https://api\.massive\.com/v2/aggs/ticker/.*")
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -173,14 +182,72 @@ def sleeps(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
 
 @pytest.fixture
+def massive_bars(httpx2_mock: HTTPXMock) -> Callable[..., None]:
+    """
+    📊 Factory: `massive_bars([daily_bar(...), ...])` sets the bars the endpoint returns.
+
+    The bars endpoint is registered once, as a reusable callback. httpx2_mock
+    answers registrations in order, so a second add_response would never be
+    reached. Keyword options fake failures: `status_code=500`,
+    `error=httpx2.TimeoutException(...)`, or `body=b"not json"`. With no call to
+    the factory, the endpoint answers an empty results list.
+    """
+    reply: dict[str, Any] = {
+        "bars": [],
+        "status_code": 200,
+        "body": None,
+        "error": None,
+    }
+
+    def _serve(request: httpx2.Request) -> httpx2.Response:
+        """📬 Answer with the configured bars, status, body, or exception."""
+        if reply["error"] is not None:
+            raise reply["error"]
+        if reply["body"] is not None:
+            content = reply["body"]
+        else:
+            content = json.dumps({"results": reply["bars"]}).encode()
+        return httpx2.Response(reply["status_code"], content=content, request=request)
+
+    httpx2_mock.add_callback(_serve, url=MASSIVE_BARS_PATTERN, is_reusable=True)
+
+    def _set(
+        bars: Sequence[dict[str, Any]] = (),
+        *,
+        status_code: int = 200,
+        body: bytes | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        """🧾 Set the reply for the next and every later bars request."""
+        reply.update(bars=list(bars), status_code=status_code, body=body, error=error)
+
+    return _set
+
+
+@pytest.fixture
+def frozen_today(monkeypatch: pytest.MonkeyPatch) -> date:
+    """
+    📅 Pin the market date to FROZEN_TODAY and return it.
+
+    get_market_stats reads the date through utils._today_eastern. Undone
+    automatically at the end of the test.
+    """
+    monkeypatch.setattr(utils, "_today_eastern", lambda: FROZEN_TODAY)
+    return FROZEN_TODAY
+
+
+@pytest.fixture
 def massive(
-    httpx2_mock: HTTPXMock, override_settings: Callable[..., Settings]
+    httpx2_mock: HTTPXMock,
+    override_settings: Callable[..., Settings],
+    massive_bars: Callable[..., None],  # 🧩 Registers the bars default with no bars
 ) -> Callable[..., None]:
     """
     🏢 Factory: `massive("AAPL", "Apple Inc.", "CS")` fakes the Massive overview call.
 
     Sets a Massive API key (without one, lookups are skipped), then registers the
     ticker endpoint on `httpx2_mock`. Pass name=None to fake a 404 (unknown ticker).
+    The bars endpoint also answers, with no bars, so market stats add no fields.
     """
     override_settings(massive_api_key="test-key")
 
