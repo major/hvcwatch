@@ -1,25 +1,31 @@
-"""Tests for HVC alert database operations."""
+"""Tests for HVC alert database operations.
 
+These are sociable tests: they use the real SQLite file that the autouse
+`settings` fixture places in tmp_path (see conftest.py).
+"""
+
+import sqlite3
+from contextlib import closing
 from datetime import date
-from unittest.mock import patch
 
 import pytest
 
-from hvcwatch.config import Settings
 from hvcwatch.db import (
     _get_week_monday,
     record_alert,
     should_alert,
 )
 
+MONDAY = date(2024, 12, 2)
 
-@pytest.fixture
-def temp_db(tmp_path):
-    """Use a temporary database for each test."""
-    db_path = tmp_path / "test_alerts.db"
-    with patch("hvcwatch.db.settings") as mock_settings:
-        mock_settings.hvcwatch_db_path = str(db_path)
-        yield db_path
+
+def count_rows(db_path) -> int:
+    """🔢 Count the rows in hvc_alerts. A database with no table has zero rows."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        try:
+            return conn.execute("SELECT COUNT(*) FROM hvc_alerts").fetchone()[0]
+        except sqlite3.OperationalError:  # 📭 Table is created on first real use
+            return 0
 
 
 class TestGetWeekMonday:
@@ -43,214 +49,195 @@ class TestGetWeekMonday:
         assert _get_week_monday(input_date) == expected_monday
 
 
-class TestShouldAlertDaily:
-    """Test cases for daily timeframe (always alert)."""
+class TestDaily:
+    """Daily alerts are never deduplicated and never stored."""
 
-    def test_daily_always_alerts(self, temp_db):
-        """Daily timeframe should always return True."""
-        assert should_alert("AAPL", "daily", date.today()) is True
-        # Even after recording, daily should still alert
-        record_alert("AAPL", "daily", date.today())
-        assert should_alert("AAPL", "daily", date.today()) is True
+    def test_daily_always_alerts(self):
+        """📅 should_alert is True for daily even when a record call came first."""
+        record_alert("AAPL", "daily", MONDAY)
 
+        assert should_alert("AAPL", "daily", MONDAY) is True
 
-class TestShouldAlertWeekly:
-    """Test cases for weekly timeframe deduplication."""
+    def test_record_alert_daily_stores_nothing(self, db_path):
+        """📅 record_alert on a daily alert writes no row."""
+        record_alert("AAPL", "daily", MONDAY)
 
-    def test_weekly_first_alert_allowed(self, temp_db):
-        """First weekly alert for a ticker should be allowed."""
-        assert should_alert("AAPL", "weekly", date(2024, 12, 2)) is True
-
-    def test_weekly_same_week_suppressed(self, temp_db):
-        """Second weekly alert in same week should be suppressed."""
-        monday = date(2024, 12, 2)
-        tuesday = date(2024, 12, 3)
-
-        # First alert on Monday
-        assert should_alert("AAPL", "weekly", monday) is True
-        record_alert("AAPL", "weekly", monday)
-
-        # Second alert on Tuesday (same week) should be suppressed
-        assert should_alert("AAPL", "weekly", tuesday) is False
-
-    def test_weekly_new_week_allowed(self, temp_db):
-        """Weekly alert in new week should be allowed."""
-        monday_week1 = date(2024, 12, 2)
-        monday_week2 = date(2024, 12, 9)
-
-        # Alert in week 1
-        assert should_alert("AAPL", "weekly", monday_week1) is True
-        record_alert("AAPL", "weekly", monday_week1)
-
-        # Alert in week 2 should be allowed
-        assert should_alert("AAPL", "weekly", monday_week2) is True
-
-    def test_weekly_different_tickers_independent(self, temp_db):
-        """Different tickers should be tracked independently."""
-        monday = date(2024, 12, 2)
-
-        # Alert AAPL
-        assert should_alert("AAPL", "weekly", monday) is True
-        record_alert("AAPL", "weekly", monday)
-
-        # MSFT should still be allowed on same day
-        assert should_alert("MSFT", "weekly", monday) is True
+        assert count_rows(db_path) == 0
 
 
-class TestShouldAlertMonthly:
-    """Test cases for monthly timeframe deduplication."""
+class TestDeduplication:
+    """Weekly (Monday-based) and monthly suppression rules."""
 
-    def test_monthly_first_alert_allowed(self, temp_db):
-        """First monthly alert for a ticker should be allowed."""
-        assert should_alert("AAPL", "monthly", date(2024, 12, 1)) is True
+    @pytest.mark.parametrize(
+        ("timeframe", "first", "second", "expected"),
+        [
+            pytest.param(
+                "weekly",
+                date(2024, 12, 2),
+                date(2024, 12, 3),
+                False,
+                id="weekly-same-week",
+            ),
+            pytest.param(
+                "weekly",
+                date(2024, 12, 2),
+                date(2024, 12, 8),
+                False,
+                id="weekly-monday-to-sunday",
+            ),
+            pytest.param(
+                "weekly",
+                date(2024, 12, 8),
+                date(2024, 12, 9),
+                True,
+                id="weekly-sunday-to-monday",
+            ),
+            pytest.param(
+                "weekly",
+                date(2024, 12, 2),
+                date(2024, 12, 9),
+                True,
+                id="weekly-next-week",
+            ),
+            pytest.param(
+                "monthly",
+                date(2024, 12, 1),
+                date(2024, 12, 15),
+                False,
+                id="monthly-same-month",
+            ),
+            pytest.param(
+                "monthly",
+                date(2024, 12, 15),
+                date(2025, 1, 5),
+                True,
+                id="monthly-next-month",
+            ),
+            pytest.param(
+                "monthly",
+                date(2024, 12, 31),
+                date(2025, 1, 1),
+                True,
+                id="monthly-year-change",
+            ),
+            pytest.param(
+                "monthly",
+                date(2024, 12, 15),
+                date(2025, 12, 15),
+                True,
+                id="monthly-same-month-next-year",
+            ),
+        ],
+    )
+    def test_second_alert_decision(self, timeframe, first, second, expected):
+        """🔁 The first alert passes, then the second follows the timeframe rule."""
+        assert should_alert("AAPL", timeframe, first) is True
+        record_alert("AAPL", timeframe, first)
 
-    def test_monthly_same_month_suppressed(self, temp_db):
-        """Second monthly alert in same month should be suppressed."""
-        dec_1 = date(2024, 12, 1)
-        dec_15 = date(2024, 12, 15)
+        assert should_alert("AAPL", timeframe, second) is expected
 
-        # First alert on Dec 1
-        assert should_alert("AAPL", "monthly", dec_1) is True
-        record_alert("AAPL", "monthly", dec_1)
+    def test_different_tickers_are_independent(self):
+        """🧍 Recording AAPL leaves MSFT allowed while AAPL stays suppressed."""
+        record_alert("AAPL", "weekly", MONDAY)
 
-        # Second alert on Dec 15 (same month) should be suppressed
-        assert should_alert("AAPL", "monthly", dec_15) is False
+        assert should_alert("MSFT", "weekly", MONDAY) is True
+        assert should_alert("AAPL", "weekly", MONDAY) is False
 
-    def test_monthly_new_month_allowed(self, temp_db):
-        """Monthly alert in new month should be allowed."""
-        dec = date(2024, 12, 15)
-        jan = date(2025, 1, 5)
+    def test_timeframes_are_independent(self):
+        """🧍 A weekly record does not suppress monthly, and the reverse."""
+        record_alert("AAPL", "weekly", MONDAY)
 
-        # Alert in December
-        assert should_alert("AAPL", "monthly", dec) is True
-        record_alert("AAPL", "monthly", dec)
+        assert should_alert("AAPL", "monthly", MONDAY) is True
 
-        # Alert in January should be allowed
-        assert should_alert("AAPL", "monthly", jan) is True
+        record_alert("AAPL", "monthly", MONDAY)
 
-    def test_monthly_year_change(self, temp_db):
-        """Monthly should handle year changes correctly."""
-        dec_2024 = date(2024, 12, 31)
-        jan_2025 = date(2025, 1, 1)
+        assert should_alert("AAPL", "weekly", MONDAY) is False
+        assert should_alert("AAPL", "monthly", MONDAY) is False
 
-        record_alert("AAPL", "monthly", dec_2024)
-        # Next day is new month AND new year
-        assert should_alert("AAPL", "monthly", jan_2025) is True
+    @pytest.mark.parametrize(
+        ("timeframe", "newer", "older", "check"),
+        [
+            pytest.param(
+                "weekly",
+                date(2024, 12, 9),
+                date(2024, 12, 2),
+                date(2024, 12, 10),
+                id="weekly",
+            ),
+            pytest.param(
+                "monthly",
+                date(2025, 1, 5),
+                date(2024, 12, 2),
+                date(2025, 1, 20),
+                id="monthly",
+            ),
+        ],
+    )
+    def test_latest_alert_wins_when_recorded_out_of_order(
+        self, timeframe, newer, older, check
+    ):
+        """⏪ The newest stored date decides, whatever order the rows were recorded."""
+        record_alert("AAPL", timeframe, newer)
+        record_alert("AAPL", timeframe, older)
+
+        assert should_alert("AAPL", timeframe, check) is False
 
 
-class TestTimeframeIndependence:
-    """Test that different timeframes are tracked independently."""
+class TestTickerCase:
+    """Ticker symbols are matched case-insensitively."""
 
-    def test_weekly_and_monthly_independent(self, temp_db):
-        """Same ticker can alert for both weekly AND monthly on same day."""
-        today = date(2024, 12, 2)
+    @pytest.mark.parametrize(
+        ("recorded", "checked"),
+        [("aapl", "AAPL"), ("AAPL", "aapl")],
+    )
+    def test_case_does_not_matter(self, recorded, checked):
+        """🔠 A record under one case suppresses a check under the other."""
+        record_alert(recorded, "weekly", MONDAY)
 
-        # Record weekly alert
-        assert should_alert("AAPL", "weekly", today) is True
-        record_alert("AAPL", "weekly", today)
-
-        # Monthly should still be allowed (different timeframe)
-        assert should_alert("AAPL", "monthly", today) is True
-        record_alert("AAPL", "monthly", today)
-
-        # Both should now be suppressed for same period
-        assert should_alert("AAPL", "weekly", today) is False
-        assert should_alert("AAPL", "monthly", today) is False
+        assert should_alert(checked, "weekly", MONDAY) is False
 
 
 class TestRecordAlert:
-    """Test cases for record_alert function."""
+    """Test cases for record_alert storage."""
 
-    def test_record_alert_creates_entry(self, temp_db):
-        """Recording an alert should create a database entry."""
-        today = date(2024, 12, 2)
+    def test_recording_the_same_key_twice_keeps_one_row(self, db_path):
+        """♻️ Re-recording the same ticker, timeframe, and date does not fail or duplicate."""
+        record_alert("AAPL", "weekly", MONDAY)
+        record_alert("AAPL", "weekly", MONDAY)
 
-        # First check should allow
-        assert should_alert("AAPL", "weekly", today) is True
-
-        # Record it
-        record_alert("AAPL", "weekly", today)
-
-        # Now it should be suppressed
-        assert should_alert("AAPL", "weekly", today) is False
-
-    def test_record_alert_daily_no_op(self, temp_db):
-        """Recording daily alerts should be a no-op (not tracked)."""
-        today = date.today()
-
-        record_alert("AAPL", "daily", today)
-        # Daily should still alert (not tracked)
-        assert should_alert("AAPL", "daily", today) is True
-
-    def test_record_alert_case_insensitive(self, temp_db):
-        """Ticker symbols should be stored uppercase."""
-        today = date(2024, 12, 2)
-
-        # Record with lowercase
-        record_alert("aapl", "weekly", today)
-
-        # Check with uppercase should be suppressed
-        assert should_alert("AAPL", "weekly", today) is False
-
-
-def _real_settings(db_path: str | None) -> Settings:
-    """Build a real Settings object with the given HVCWATCH_DB_PATH value."""
-    return Settings(
-        fastmail_user="u",
-        fastmail_pass="p",
-        discord_webhook_url="https://discord.com/api/webhooks/1",
-        hvcwatch_db_path=db_path,
-    )
+        assert count_rows(db_path) == 1
 
 
 class TestDatabasePath:
     """Test database path configuration."""
 
-    def test_uses_configured_path(self, tmp_path):
-        """Should use path from settings when configured."""
-        db_path = tmp_path / "custom.db"
-        with patch("hvcwatch.db.settings") as mock_settings:
-            mock_settings.hvcwatch_db_path = str(db_path)
-
-            # Trigger database creation
-            record_alert("TEST", "weekly", date.today())
-
-            # Verify file was created at custom path
-            assert db_path.exists()
-
-    def test_creates_missing_parent_dirs_for_configured_path(
-        self, tmp_path, monkeypatch
-    ):
-        """A custom path whose parent directories do not exist should still work."""
-        db_path = tmp_path / "nested" / "deeper" / "custom.db"
-        monkeypatch.setattr("hvcwatch.db.settings", _real_settings(str(db_path)))
-
-        record_alert("TEST", "weekly", date(2024, 12, 2))
+    def test_uses_configured_path(self, db_path):
+        """🗄️ The database is created at the path from settings."""
+        record_alert("TEST", "weekly", MONDAY)
 
         assert db_path.exists()
+
+    def test_creates_missing_parent_dirs_for_configured_path(
+        self, tmp_path, override_settings
+    ):
+        """📁 A custom path whose parent directories do not exist still works."""
+        nested = tmp_path / "nested" / "deeper" / "custom.db"
+        override_settings(hvcwatch_db_path=str(nested))
+
+        record_alert("TEST", "weekly", MONDAY)
+
+        assert nested.exists()
         assert should_alert("TEST", "weekly", date(2024, 12, 3)) is False
 
-    def test_empty_path_falls_back_to_default(self, tmp_path, monkeypatch):
-        """HVCWATCH_DB_PATH="" is treated as unset and uses ~/.hvcwatch/alerts.db."""
-        monkeypatch.setattr("hvcwatch.db.settings", _real_settings(""))
-        monkeypatch.setattr("hvcwatch.db.Path.home", lambda: tmp_path)
+    @pytest.mark.parametrize("configured", [None, ""], ids=["unset", "empty"])
+    def test_uses_default_path_when_not_configured(
+        self, tmp_path, monkeypatch, override_settings, db_path, configured
+    ):
+        """🏠 An unset or empty path goes under $HOME/.hvcwatch."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        override_settings(hvcwatch_db_path=configured)
 
-        record_alert("TEST", "weekly", date(2024, 12, 2))
+        record_alert("TEST", "weekly", MONDAY)
 
         assert (tmp_path / ".hvcwatch" / "alerts.db").exists()
-
-    def test_uses_default_path_when_not_configured(self, tmp_path):
-        """Should use default ~/.hvcwatch/alerts.db when not configured."""
-        with (
-            patch("hvcwatch.db.settings") as mock_settings,
-            patch("hvcwatch.db.Path.home") as mock_home,
-        ):
-            mock_settings.hvcwatch_db_path = None
-            mock_home.return_value = tmp_path
-
-            # Trigger database creation
-            record_alert("TEST", "weekly", date.today())
-
-            # Verify file was created at default path
-            expected_path = tmp_path / ".hvcwatch" / "alerts.db"
-            assert expected_path.exists()
+        assert not db_path.exists()
