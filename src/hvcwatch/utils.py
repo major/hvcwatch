@@ -1,3 +1,4 @@
+import logging
 import re
 from datetime import date, datetime, timedelta
 from functools import cache
@@ -7,8 +8,9 @@ import exchange_calendars as xcals
 import requests
 
 from hvcwatch.config import settings
-from hvcwatch.logging import logger
 from hvcwatch.types import Timeframe
+
+logger = logging.getLogger(__name__)
 
 MASSIVE_TICKER_URL = "https://api.massive.com/v3/reference/tickers/{ticker}"
 MASSIVE_TIMEOUT_SECONDS = 10
@@ -41,7 +43,7 @@ def _lookup_company_name(ticker: str) -> str | None:
         timeout=MASSIVE_TIMEOUT_SECONDS,
     )
     if response.status_code == 404:
-        logger.info("Ticker not found on Massive ticker={ticker}", ticker=ticker)
+        logger.info("Ticker not found on Massive ticker=%s", ticker)
         return None
     response.raise_for_status()
     return response.json()["results"]["name"]
@@ -68,15 +70,15 @@ def get_company_name(ticker: str) -> str | None:
         return _lookup_company_name(ticker.upper())
     except Exception as e:  # 🛡️ Broad catch: a notification must still be sent
         logger.warning(
-            "Company name lookup failed ticker={ticker} error={error}",
-            ticker=ticker,
-            error=str(e),
+            "Company name lookup failed ticker=%s error=%s",
+            ticker,
+            str(e),
         )
         return None
 
 
 def extract_tickers(subject: str) -> list[str]:
-    logger.info("Extracting tickers subject={subject}", subject=subject)
+    logger.info("Extracting tickers subject=%s", subject)
     pattern = r"symbols?:\s*([\w/,\s]+)\s+(?:were|was)\s+added"
     tickers_re = re.compile(pattern, re.IGNORECASE)
     match = tickers_re.search(subject)
@@ -85,7 +87,7 @@ def extract_tickers(subject: str) -> list[str]:
         tickers = [
             x.strip().upper() for x in match.group(1).split(",") if "/" not in x.strip()
         ]
-        logger.info("Extracted tickers tickers={tickers}", tickers=tickers)
+        logger.info("Extracted tickers tickers=%s", tickers)
         return tickers
     else:
         logger.info("No tickers found in subject")

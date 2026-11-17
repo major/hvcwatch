@@ -1,3 +1,4 @@
+import logging
 from datetime import date
 
 import sentry_sdk
@@ -7,9 +8,10 @@ from imap_tools.query import AND, A
 
 from hvcwatch.config import settings
 from hvcwatch.db import record_alert, should_alert
-from hvcwatch.logging import logger
 from hvcwatch.notification import Timeframe, notify_all_platforms
 from hvcwatch.utils import extract_tickers, extract_timeframe, is_market_hours_or_near
+
+logger = logging.getLogger(__name__)
 
 
 def is_timeframe_enabled(timeframe: Timeframe) -> bool:
@@ -113,13 +115,13 @@ def get_unread_messages(mailbox: BaseMailBox) -> None:
     if not unread_messages:
         return
 
-    logger.info(f"Processing {len(unread_messages)} unread messages")
+    logger.info("Processing %s unread messages", len(unread_messages))
 
     for msg in unread_messages:
         logger.info(
-            "Found unread email subject={subject} date={date}",
-            subject=msg.subject,
-            date=msg.date.strftime("%Y-%m-%d %H:%M"),
+            "Found unread email subject=%s date=%s",
+            msg.subject,
+            msg.date.strftime("%Y-%m-%d %H:%M"),
         )
         process_email_message(msg)
 
@@ -179,10 +181,7 @@ def process_email_message(msg: MailMessage) -> None:
     )
 
     if not is_timeframe_enabled(timeframe):
-        logger.info(
-            "Timeframe disabled in config timeframe={timeframe}",
-            timeframe=timeframe,
-        )
+        logger.info("Timeframe disabled in config timeframe=%s", timeframe)
         sentry_sdk.add_breadcrumb(
             category="email",
             message=f"Alert skipped - {timeframe} timeframe disabled",
@@ -194,14 +193,10 @@ def process_email_message(msg: MailMessage) -> None:
         if should_alert(ticker, timeframe, alert_date):
             notify_all_platforms(ticker, timeframe)
             record_alert(ticker, timeframe, alert_date)
-            logger.info(
-                "Alert sent ticker={ticker} timeframe={timeframe}",
-                ticker=ticker,
-                timeframe=timeframe,
-            )
+            logger.info("Alert sent ticker=%s timeframe=%s", ticker, timeframe)
         else:
             logger.info(
-                "Alert suppressed (duplicate) ticker={ticker} timeframe={timeframe}",
-                ticker=ticker,
-                timeframe=timeframe,
+                "Alert suppressed (duplicate) ticker=%s timeframe=%s",
+                ticker,
+                timeframe,
             )

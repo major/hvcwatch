@@ -4,14 +4,16 @@ Prevents duplicate alerts for weekly/monthly HVC timeframes by tracking
 when alerts were last sent for each ticker.
 """
 
+import logging
 import sqlite3
 from contextlib import closing
 from datetime import date, timedelta
 from pathlib import Path
 
 from hvcwatch.config import settings
-from hvcwatch.logging import logger
 from hvcwatch.types import Timeframe
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS hvc_alerts (
@@ -81,9 +83,7 @@ def should_alert(ticker: str, timeframe: Timeframe, alert_date: date) -> bool:
         if row is None:
             # No previous alert - allow
             logger.debug(
-                "No previous alert found ticker={ticker} timeframe={timeframe}",
-                ticker=ticker,
-                timeframe=timeframe,
+                "No previous alert found ticker=%s timeframe=%s", ticker, timeframe
             )
             return True
 
@@ -95,12 +95,12 @@ def should_alert(ticker: str, timeframe: Timeframe, alert_date: date) -> bool:
             current_monday = _get_week_monday(alert_date)
             should_send = last_monday != current_monday
             logger.debug(
-                "Weekly dedup check ticker={ticker} last_alert={last_alert} last_monday={last_monday} current_monday={current_monday} should_alert={should_alert}",
-                ticker=ticker,
-                last_alert=str(last_alert_date),
-                last_monday=str(last_monday),
-                current_monday=str(current_monday),
-                should_alert=should_send,
+                "Weekly dedup check ticker=%s last_alert=%s last_monday=%s current_monday=%s should_alert=%s",
+                ticker,
+                last_alert_date,
+                last_monday,
+                current_monday,
+                should_send,
             )
             return should_send
 
@@ -111,11 +111,11 @@ def should_alert(ticker: str, timeframe: Timeframe, alert_date: date) -> bool:
                 alert_date.month,
             )
             logger.debug(
-                "Monthly dedup check ticker={ticker} last_alert={last_alert} current_date={current_date} should_alert={should_alert}",
-                ticker=ticker,
-                last_alert=str(last_alert_date),
-                current_date=str(alert_date),
-                should_alert=should_send,
+                "Monthly dedup check ticker=%s last_alert=%s current_date=%s should_alert=%s",
+                ticker,
+                last_alert_date,
+                alert_date,
+                should_send,
             )
             return should_send
 
@@ -142,8 +142,8 @@ def record_alert(ticker: str, timeframe: Timeframe, alert_date: date) -> None:
         )
         conn.commit()
         logger.debug(
-            "Recorded alert ticker={ticker} timeframe={timeframe} alert_date={alert_date}",
-            ticker=ticker,
-            timeframe=timeframe,
-            alert_date=str(alert_date),
+            "Recorded alert ticker=%s timeframe=%s alert_date=%s",
+            ticker,
+            timeframe,
+            alert_date,
         )

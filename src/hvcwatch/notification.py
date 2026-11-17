@@ -1,12 +1,14 @@
+import logging
 from typing import Protocol
 
 import sentry_sdk
 from discord_webhook import DiscordEmbed, DiscordWebhook
 
 from hvcwatch.config import settings
-from hvcwatch.logging import logger
 from hvcwatch.types import Timeframe
 from hvcwatch.utils import get_company_name
+
+logger = logging.getLogger(__name__)
 
 
 class NotificationProvider(Protocol):
@@ -54,11 +56,7 @@ class DiscordNotifier:
             ticker: Stock ticker symbol (e.g., "AAPL")
             timeframe: Alert timeframe ("daily", "weekly", or "monthly")
         """
-        logger.info(
-            "Sending to Discord ticker={ticker} timeframe={timeframe}",
-            ticker=ticker,
-            timeframe=timeframe,
-        )
+        logger.info("Sending to Discord ticker=%s timeframe=%s", ticker, timeframe)
         sentry_sdk.add_breadcrumb(
             category="notification",
             message="Sending Discord notification",
@@ -98,10 +96,7 @@ class DiscordNotifier:
         embed.set_timestamp()
         webhook.add_embed(embed)
         response = webhook.execute()
-        logger.info(
-            "Discord response status_code={status_code}",
-            status_code=response.status_code,
-        )
+        logger.info("Discord response status_code=%s", response.status_code)
 
 
 def notify_all_platforms(ticker: str, timeframe: Timeframe = "daily") -> None:
@@ -114,11 +109,7 @@ def notify_all_platforms(ticker: str, timeframe: Timeframe = "daily") -> None:
         ticker: Stock ticker symbol (e.g., "AAPL")
         timeframe: Alert timeframe ("daily", "weekly", or "monthly")
     """
-    logger.info(
-        "Sending notifications ticker={ticker} timeframe={timeframe}",
-        ticker=ticker,
-        timeframe=timeframe,
-    )
+    logger.info("Sending notifications ticker=%s timeframe=%s", ticker, timeframe)
     sentry_sdk.add_breadcrumb(
         category="notification",
         message="Starting notification process",
@@ -137,29 +128,27 @@ def notify_all_platforms(ticker: str, timeframe: Timeframe = "daily") -> None:
                 discord_notifier = DiscordNotifier(webhook_url=webhook_url)
                 discord_notifier.send(ticker, timeframe)
                 logger.info(
-                    "Notification sent successfully ticker={ticker} timeframe={timeframe} platform={platform} webhook_url={webhook_url}",
-                    ticker=ticker,
-                    timeframe=timeframe,
-                    platform="Discord",
-                    webhook_url=webhook_url[:50] + "...",  # Truncate for logging
+                    "Notification sent successfully ticker=%s timeframe=%s platform=%s webhook_url=%s",
+                    ticker,
+                    timeframe,
+                    "Discord",
+                    webhook_url[:50] + "...",  # Truncate for logging
                 )
                 notifications_sent += 1
             except Exception as e:
                 logger.error(
-                    "Failed to send notification ticker={ticker} platform={platform} webhook_url={webhook_url} error={error}",
-                    ticker=ticker,
-                    platform="Discord",
-                    webhook_url=webhook_url[:50] + "...",  # Truncate for logging
-                    error=str(e),
+                    "Failed to send notification ticker=%s platform=%s webhook_url=%s error=%s",
+                    ticker,
+                    "Discord",
+                    webhook_url[:50] + "...",  # Truncate for logging
+                    str(e),
                 )
     else:
-        logger.debug(
-            "Discord webhook not configured, skipping ticker={ticker}", ticker=ticker
-        )
+        logger.debug("Discord webhook not configured, skipping ticker=%s", ticker)
 
     # Warn if no notifications were sent at all
     if notifications_sent == 0:
         logger.warning(
-            "No notifications sent - no Discord webhooks configured ticker={ticker}",
-            ticker=ticker,
+            "No notifications sent - no Discord webhooks configured ticker=%s",
+            ticker,
         )
