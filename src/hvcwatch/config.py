@@ -5,12 +5,6 @@ from collections.abc import Mapping
 from dataclasses import MISSING, dataclass, fields
 from typing import Any
 
-# 🔑 Env var names for fields that do not use their UPPERCASE field name.
-# POLYGON_API_KEY is still accepted so existing setups keep working.
-_ENV_ALIASES: dict[str, tuple[str, ...]] = {
-    "massive_api_key": ("MASSIVE_API_KEY", "POLYGON_API_KEY"),
-}
-
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
@@ -143,9 +137,9 @@ class Settings:
         """
         🌱 Build Settings from environment variables.
 
-        Each field reads the env var with its UPPERCASE name, unless it is listed
-        in _ENV_ALIASES. Fields with no env var set use their dataclass default.
-        Values are coerced to the field type. Only env vars are read, not .env files.
+        Each field reads the env var with its UPPERCASE name. Fields with no env
+        var set use their dataclass default. Values are coerced to the field type.
+        Only env vars are read, not .env files.
 
         Args:
             env: Mapping to read from. Defaults to os.environ.
@@ -163,13 +157,11 @@ class Settings:
         missing: list[str] = []
 
         for f in fields(cls):
-            names = _ENV_ALIASES.get(f.name, (f.name.upper(),))
-            # 🎯 Use the first alias that is set in the source
-            name = next((n for n in names if n in source), None)
-            if name is not None:
+            name = f.name.upper()
+            if name in source:
                 kwargs[f.name] = _coerce(name, source[name], _base_type(f.type))
             elif f.default is MISSING and f.default_factory is MISSING:
-                missing.append(names[0])
+                missing.append(name)
 
         if missing:
             msg = f"Missing required environment variables: {', '.join(missing)}"
