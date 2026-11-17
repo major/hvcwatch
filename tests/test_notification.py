@@ -1,8 +1,9 @@
 """Tests for the notification module.
 
-Only HTTP is faked (`responses`, via the shared `http_mock` fixture). The real
-DiscordNotifier, DiscordWebhook, DiscordEmbed, and get_company_name run, so the
-tests assert the payload a Discord user would see.
+Only HTTP is faked. Discord uses `responses` (the shared `http_mock` fixture), and
+Massive uses `httpx2_mock`. The real DiscordNotifier, DiscordWebhook,
+DiscordEmbed, and get_company_name run, so the tests assert the payload a Discord
+user would see.
 """
 
 import logging

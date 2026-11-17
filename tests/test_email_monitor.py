@@ -2,9 +2,9 @@
 
 `process_email_message` and `is_timeframe_enabled` run the real pipeline: real
 ticker and timeframe parsing, market-hours check, dedup in a SQLite file under
-tmp_path, real DiscordNotifier, and real company lookups. Only HTTP is faked
-(`responses`, via the shared fixtures). The IMAP tests still patch the
-functions they wire together.
+tmp_path, real DiscordNotifier, and real company lookups. Only HTTP is faked:
+Discord uses `responses` and Massive uses `httpx2_mock`, both via the shared
+fixtures. The IMAP tests still patch the functions they wire together.
 """
 
 import logging
