@@ -1,7 +1,6 @@
 import logging
 from typing import Protocol
 
-import sentry_sdk
 from discord_webhook import DiscordEmbed, DiscordWebhook
 
 from hvcwatch.config import settings
@@ -57,17 +56,6 @@ class DiscordNotifier:
             timeframe: Alert timeframe ("daily", "weekly", or "monthly")
         """
         logger.info("Sending to Discord ticker=%s timeframe=%s", ticker, timeframe)
-        sentry_sdk.add_breadcrumb(
-            category="notification",
-            message="Sending Discord notification",
-            level="info",
-            data={
-                "ticker": ticker,
-                "timeframe": timeframe,
-                "platform": "Discord",
-            },
-        )
-
         webhook = DiscordWebhook(
             url=self.webhook_url,
             rate_limit_retry=True,
@@ -110,12 +98,6 @@ def notify_all_platforms(ticker: str, timeframe: Timeframe = "daily") -> None:
         timeframe: Alert timeframe ("daily", "weekly", or "monthly")
     """
     logger.info("Sending notifications ticker=%s timeframe=%s", ticker, timeframe)
-    sentry_sdk.add_breadcrumb(
-        category="notification",
-        message="Starting notification process",
-        level="info",
-        data={"ticker": ticker, "timeframe": timeframe},
-    )
 
     # Track if at least one notification was sent
     notifications_sent = 0
