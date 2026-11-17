@@ -1,15 +1,64 @@
 """Centralized stdlib logging setup for hvcwatch."""
 
+import json
 import logging
 import sys
+from datetime import UTC, datetime
+from typing import Any
 
 LOGGER_NAME = "hvcwatch"
-LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
+
+# 🧮 Attributes every LogRecord has, so any other attribute came from `extra=`
+STANDARD_ATTRS = frozenset(vars(logging.LogRecord("", 0, "", 0, "", (), None))) | {
+    "message",
+    "asctime",
+}
+
+
+class JsonFormatter(logging.Formatter):
+    """
+    Format each log record as one JSON object, which tools such as `hl` can read.
+
+    Every entry has timestamp (UTC), level, logger, and message. It also has
+    exception when the record carries exc_info. Values passed with `extra=`
+    become top-level keys. When an extra has the same name as a core field,
+    the core field wins.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        """
+        Build the JSON line for one record.
+
+        Args:
+            record: The log record to format
+
+        Returns:
+            One line of JSON. Newlines inside tracebacks are escaped, so the line stays whole.
+        """
+        # 🕒 Millisecond precision, always UTC, so hl and other readers sort entries reliably
+        core: dict[str, Any] = {
+            "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(
+                timespec="milliseconds"
+            ),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            core["exception"] = self.formatException(record.exc_info)
+
+        extras = {
+            key: value
+            for key, value in vars(record).items()
+            if key not in STANDARD_ATTRS and key not in core
+        }
+        # 🛟 default=str keeps logging alive when an extra value is not JSON-serializable
+        return json.dumps({**core, **extras}, default=str)
 
 
 def setup_logging(level: int | str = logging.INFO) -> None:
     """
-    Configure the hvcwatch logger to write to stderr.
+    Configure the hvcwatch logger to write JSON lines to stderr.
 
     Safe to call more than once. Each call replaces the handler added by an
     earlier call, so messages never print twice.
@@ -24,6 +73,6 @@ def setup_logging(level: int | str = logging.INFO) -> None:
         handler.close()
 
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    handler.setFormatter(JsonFormatter())
     logger.addHandler(handler)
     logger.setLevel(level)
