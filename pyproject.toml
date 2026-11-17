@@ -29,7 +29,6 @@ dev = [
     "pytest>=9.2.0",
     "pytest-cov>=7.1.0",
     "pytest-randomly>=5.1.0",
-    "radon>=6.0.1",
     "ruff>=0.17.5",
     "ty>=0.0.105",
 ]
@@ -58,6 +57,12 @@ env = [
 
 [tool.ruff]
 fix = true
+
+[tool.ruff.lint]
+extend-select = ["C901"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
 
 [tool.ruff.format]
 preview = true
