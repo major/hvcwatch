@@ -6,7 +6,7 @@ from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
-import requests
+import httpx2
 from exchange_calendars.errors import DateOutOfBounds
 
 from hvcwatch.config import settings
@@ -43,12 +43,12 @@ def _lookup_ticker_overview(ticker: str) -> TickerOverview:
         or empty type is None, and the name is still returned.
 
     Raises:
-        requests.RequestException: Network error, timeout, or non-2xx status
+        httpx2.HTTPError: Network error, timeout, or non-2xx status
         KeyError: Response JSON is missing results.name
         ValueError: Response body is not valid JSON
     """
     # 🔐 The key goes in the header, never the URL, so it stays out of logs
-    response = requests.get(
+    response = httpx2.get(
         MASSIVE_TICKER_URL.format(ticker=ticker),
         headers={"Authorization": f"Bearer {settings.massive_api_key}"},
         timeout=MASSIVE_TIMEOUT_SECONDS,

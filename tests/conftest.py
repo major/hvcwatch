@@ -3,7 +3,8 @@
 Autouse fixtures (nothing to request, they always run):
     _isolated_home   HOME points into tmp_path, so the real ~/.hvcwatch is unreachable.
     settings         Real, frozen Settings bound into every module that imports it.
-    http_mock        `responses` is active, so an unregistered HTTP call raises.
+    http_mock        `responses` is active (requests, used by Discord), so an unregistered call raises.
+    _httpx2_guard    `httpx2_mock` is active (httpx2, used by Massive), so an unregistered call raises.
     _clear_ticker_overview_cache   Empties utils._lookup_ticker_overview before and after.
     sleeps                         Records retry waits instead of sleeping, jitter off.
 
@@ -22,6 +23,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import responses
+from pytest_httpx2 import HTTPXMock
 
 from hvcwatch import utils
 from hvcwatch.config import Settings
@@ -31,6 +33,20 @@ from tests.helpers import WEBHOOK_URL
 # 📦 `settings` is bound by name in each of these modules (`from ... import settings`),
 # so patching hvcwatch.config.settings alone would change none of them.
 SETTINGS_MODULES = ("main", "email_monitor", "db", "notification", "utils")
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """
+    🧩 Let `httpx2_mock` keep replies that a test never uses, like `responses` does.
+
+    The plugin fails a test for unused replies by default. Turn that off here.
+    Unregistered calls still raise, and the plugin also fails the test at teardown
+    for them, even if the code caught the error. A test that expects the error can
+    opt out with `@pytest.mark.httpx2_mock(assert_all_requests_were_expected=False)`.
+    """
+    marker = pytest.mark.httpx2_mock(assert_all_responses_were_requested=False)
+    for item in items:
+        item.add_marker(marker)
 
 
 def _bind_settings(monkeypatch: pytest.MonkeyPatch, value: Settings) -> None:
@@ -96,7 +112,7 @@ def override_settings(
 @pytest.fixture(autouse=True)
 def http_mock() -> Iterator[responses.RequestsMock]:
     """
-    🔌 Activate `responses` for every test.
+    🔌 Activate `responses` for every test (requests, used by Discord).
 
     An HTTP call with no registered response raises requests.ConnectionError
     instead of reaching the network. Register replies with `http_mock.get(...)`.
@@ -104,6 +120,17 @@ def http_mock() -> Iterator[responses.RequestsMock]:
     """
     with responses.RequestsMock(assert_all_requests_are_fired=False) as mock:
         yield mock
+
+
+@pytest.fixture(autouse=True)
+def _httpx2_guard(httpx2_mock: HTTPXMock) -> None:
+    """
+    🛡️ Activate `httpx2_mock` for every test (httpx2, used by Massive).
+
+    Requesting the plugin fixture patches httpx2's transports. An HTTP call with
+    no registered reply raises httpx2.TimeoutException instead of reaching the
+    network. Register replies with `httpx2_mock.add_response(url=..., ...)`.
+    """
 
 
 @pytest.fixture(autouse=True)
@@ -151,22 +178,24 @@ def sleeps(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
 @pytest.fixture
 def massive(
-    http_mock: responses.RequestsMock, override_settings: Callable[..., Settings]
+    httpx2_mock: HTTPXMock, override_settings: Callable[..., Settings]
 ) -> Callable[..., None]:
     """
     🏢 Factory: `massive("AAPL", "Apple Inc.", "CS")` fakes the Massive overview call.
 
     Sets a Massive API key (without one, lookups are skipped), then registers the
-    ticker endpoint. Pass name=None to fake a 404 (unknown ticker).
+    ticker endpoint on `httpx2_mock`. Pass name=None to fake a 404 (unknown ticker).
     """
     override_settings(massive_api_key="test-key")
 
     def _register(ticker: str, name: str | None, type_: str | None = None) -> None:
         url = MASSIVE_TICKER_URL.format(ticker=ticker.upper())
         if name is None:
-            http_mock.get(url, status=404, json={"status": "NOT_FOUND"})
+            httpx2_mock.add_response(
+                url=url, status_code=404, json={"status": "NOT_FOUND"}
+            )
             return
         results = {"name": name, **({"type": type_} if type_ else {})}
-        http_mock.get(url, json={"results": results})
+        httpx2_mock.add_response(url=url, json={"results": results})
 
     return _register
