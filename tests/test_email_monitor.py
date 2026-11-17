@@ -1,18 +1,18 @@
 """Tests for the email monitor.
 
-`process_email_message` and `is_timeframe_enabled` run the real pipeline: real
-ticker and timeframe parsing, market-hours check, dedup in a SQLite file under
-tmp_path, real DiscordNotifier, and real company lookups. Only HTTP is faked:
-Discord uses `responses` and Massive uses `httpx2_mock`, both via the shared
-fixtures. The IMAP tests still patch the functions they wire together.
+Every test runs the real pipeline: real IMAP-to-alert flow, ticker and timeframe
+parsing, market-hours check, dedup in a SQLite file under tmp_path, real
+DiscordNotifier, and real company lookups. Only two boundaries are faked: HTTP
+(Discord uses `responses`, Massive uses `httpx2_mock`, both via the shared
+fixtures) and the imap_tools MailBox (`fake_mailbox`, a scripted FakeMailBox
+from conftest.py).
 """
 
 import logging
 import sqlite3
 from contextlib import closing
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 import responses
@@ -26,7 +26,7 @@ from hvcwatch.email_monitor import (
     monitor_mailbox,
     process_email_message,
 )
-from tests.helpers import SECOND_URL, WEBHOOK_URL, only_embed, posts_to
+from tests.helpers import SECOND_URL, WEBHOOK_URL, ScriptExhausted, only_embed, posts_to
 
 # 📅 Dates are written in Eastern time. Monday 14:30 is market hours.
 MONDAY = "Mon, 02 Dec 2024 14:30:00 -0500"
@@ -39,18 +39,12 @@ MONDAY_NEXT_YEAR = "Mon, 01 Dec 2025 14:30:00 -0500"
 # 📧 Subjects in the format the real alert emails use
 DAILY_SUBJECT = "Alert: New symbols: AAPL were added to HVC"
 WEEKLY_SUBJECT = "Alert: New symbols: AAPL were added to HVC Weekly"
+MSFT_WEEKLY_SUBJECT = "Alert: New symbols: MSFT were added to HVC Weekly"
 WEEKLY_THREE_SUBJECT = "Alert: New symbols: AAPL, MSFT, NVDA were added to HVC Weekly"
 MONTHLY_SUBJECT = "Alert: New symbols: AAPL were added to HVC Monthly"
 
-
-@pytest.fixture
-def mock_mailbox():
-    mailbox = MagicMock()
-    mailbox.idle.__enter__.return_value = mailbox.idle
-    mailbox.idle.__exit__.return_value = None
-    mailbox.idle.poll.return_value = []
-    mailbox.fetch.return_value = []
-    return mailbox
+# 📨 What IDLE returns when the server reports a new message
+NEW_MAIL = [b"* 1 EXISTS"]
 
 
 def make_email(subject: str | None, date_header: str = MONDAY) -> MailMessage:
@@ -80,79 +74,114 @@ def posted_titles(
     return [only_embed(payload)["title"] for payload in posts_to(http_mock, url)]
 
 
-@pytest.mark.parametrize(
-    "responses,expected_process",
-    [
-        ([{"EXISTS": 1}], True),
-        ([], False),
-    ],
-)
-def test_monitor_mailbox_detects_new_email(responses, expected_process, mock_mailbox):
-    mock_msg = MagicMock()
-    mock_msg.date = datetime(2024, 6, 1, 14, 30)
-    mock_msg.subject = "Test"
-    mock_mailbox.fetch.return_value = [mock_msg]
+class TestGetUnreadMessages:
+    """Unread mail is fetched once, marked seen, and each message goes through the pipeline."""
 
-    # Control the number of iterations by tracking calls
-    call_count = 0
-
-    def limited_poll(*_args, **_kwargs):
-        nonlocal call_count
-        call_count += 1
-        if call_count > 1:
-            raise KeyboardInterrupt()
-        return responses  # Return the actual responses for the first call
-
-    mock_mailbox.idle.poll.side_effect = limited_poll
-
-    with patch("hvcwatch.email_monitor.process_email_message") as mock_process:
-        try:
-            monitor_mailbox(mock_mailbox)
-        except KeyboardInterrupt:
-            pass
-
-        if expected_process:
-            mock_process.assert_called_once_with(mock_msg)
-        else:
-            mock_process.assert_not_called()
-
-
-def test_connect_imap_calls_monitor_and_unread():
-    mock_mailbox_instance = MagicMock()
-
-    with (
-        patch("hvcwatch.email_monitor.MailBox") as mock_mailbox_class,
-        patch("hvcwatch.email_monitor.get_unread_messages") as mock_get_unread,
-        patch("hvcwatch.email_monitor.monitor_mailbox") as mock_monitor,
+    def test_only_the_market_hours_alert_is_sent_and_recorded(
+        self, http_mock, fake_discord, fake_mailbox, db_path
     ):
-        # Setup the mailbox mock to work as a context manager
-        mock_mailbox_class.return_value.__enter__.return_value = mock_mailbox_instance
-        mock_mailbox_class.return_value.__exit__.return_value = None
-        mock_mailbox_class.return_value.login.return_value = (
-            mock_mailbox_class.return_value
+        """📬 Of two unread mails, the weekday weekly alert is sent and the Saturday one is not."""
+        # Arrange
+        fake_discord()
+        mailbox = fake_mailbox(
+            fetches=[
+                [make_email(WEEKLY_SUBJECT), make_email(MSFT_WEEKLY_SUBJECT, SATURDAY)]
+            ]
         )
 
-        connect_imap("host", "user", "pass", "INBOX")
+        # Act
+        get_unread_messages(mailbox)
 
-        # Verify the functions were called with the mailbox instance
-        mock_get_unread.assert_called_once_with(mock_mailbox_instance)
-        mock_monitor.assert_called_once_with(mock_mailbox_instance)
+        # Assert
+        assert posted_titles(http_mock) == ["AAPL"]
+        assert read_alert_rows(db_path) == [("AAPL", "weekly", "2024-12-02")]
+        assert mailbox.fetch_calls == [("(UNSEEN)", True)]
+
+    def test_no_unread_mail_sends_nothing(
+        self, http_mock, fake_discord, fake_mailbox, db_path
+    ):
+        """📭 An empty inbox sends nothing, records nothing, and still runs one fetch."""
+        # Arrange
+        fake_discord()
+        mailbox = fake_mailbox(fetches=[[]])
+
+        # Act
+        get_unread_messages(mailbox)
+
+        # Assert
+        assert posted_titles(http_mock) == []
+        assert read_alert_rows(db_path) == []
+        assert mailbox.fetch_calls == [("(UNSEEN)", True)]
 
 
-@pytest.mark.parametrize("unread_count", [0, 2])
-def test_get_unread_messages_processes_emails(unread_count):
-    mock_mailbox = MagicMock()
-    mock_msgs = [
-        MagicMock(subject=f"Subject {i}", date=datetime(2024, 6, 1, 14, 30))
-        for i in range(unread_count)
-    ]
-    mock_mailbox.fetch.return_value = mock_msgs
-    with patch("hvcwatch.email_monitor.process_email_message") as mock_process:
-        get_unread_messages(mock_mailbox)
-        if unread_count == 0:
-            mock_process.assert_not_called()
-        else:
-            assert mock_process.call_count == unread_count
+class TestMonitorMailbox:
+    """The IDLE loop: a poll that reports new mail fetches and processes unseen mail."""
+
+    def test_new_mail_during_idle_is_fetched_and_processed(
+        self, http_mock, fake_discord, fake_mailbox, db_path
+    ):
+        """📨 A new-mail poll fetches the unseen weekly alert, then the loop polls again."""
+        # Arrange
+        fake_discord()
+        mailbox = fake_mailbox(fetches=[[make_email(WEEKLY_SUBJECT)]], polls=[NEW_MAIL])
+
+        # Act: the script ends on the second poll
+        with pytest.raises(ScriptExhausted):
+            monitor_mailbox(mailbox)
+
+        # Assert
+        assert posted_titles(http_mock) == ["AAPL"]
+        assert read_alert_rows(db_path) == [("AAPL", "weekly", "2024-12-02")]
+        assert mailbox.fetch_calls == [("(UNSEEN)", True)]
+        assert mailbox.idle.timeouts == [10, 10]
+
+    def test_idle_timeout_without_new_mail_fetches_nothing(
+        self, http_mock, fake_discord, fake_mailbox, db_path
+    ):
+        """⏱️ An IDLE timeout with no new mail neither fetches nor sends anything."""
+        # Arrange
+        fake_discord()
+        mailbox = fake_mailbox(polls=[[]])
+
+        # Act: the script ends on the second poll
+        with pytest.raises(ScriptExhausted):
+            monitor_mailbox(mailbox)
+
+        # Assert
+        assert posted_titles(http_mock) == []
+        assert read_alert_rows(db_path) == []
+        assert mailbox.fetch_calls == []
+        assert mailbox.idle.timeouts == [10, 10]
+
+
+class TestConnectImap:
+    """connect_imap logs in, handles unread mail, then monitors IDLE until the script ends."""
+
+    def test_logs_in_handles_unread_then_idle_mail_and_logs_out(
+        self, http_mock, fake_discord, fake_mailbox, db_path
+    ):
+        """🔌 Unread AAPL is sent first, then MSFT from the IDLE poll, and the session closes."""
+        # Arrange
+        fake_discord()
+        mailbox = fake_mailbox(
+            fetches=[[make_email(WEEKLY_SUBJECT)], [make_email(MSFT_WEEKLY_SUBJECT)]],
+            polls=[NEW_MAIL],
+        )
+
+        # Act: the script ends on the second IDLE poll
+        with pytest.raises(ScriptExhausted):
+            connect_imap("imap.example.com", "user", "pass", "Alerts")
+
+        # Assert
+        assert mailbox.host == "imap.example.com"
+        assert mailbox.login_args == ("user", "pass", "Alerts")
+        assert posted_titles(http_mock) == ["AAPL", "MSFT"]
+        assert read_alert_rows(db_path) == [
+            ("AAPL", "weekly", "2024-12-02"),
+            ("MSFT", "weekly", "2024-12-02"),
+        ]
+        assert mailbox.fetch_calls == [("(UNSEEN)", True), ("(UNSEEN)", True)]
+        assert mailbox.logged_out
 
 
 class TestProcessEmailMessage:

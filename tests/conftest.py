@@ -13,22 +13,27 @@ Opt-in fixtures (request them by name):
     db_path             The SQLite file used by the default `settings`.
     fake_discord        Factory that registers a Discord webhook that accepts POSTs.
     massive             Factory that fakes the Massive ticker overview endpoint.
+    fake_mailbox        Factory that swaps imap_tools MailBox for a scripted FakeMailBox.
+    hvcwatch_logger     The hvcwatch logger, cleaned before and restored after the test.
 """
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
+from logging import Logger, getLogger
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple, Self
 from unittest.mock import MagicMock
 
 import pytest
 import responses
+from imap_tools.message import MailMessage
 from pytest_httpx2 import HTTPXMock
 
 from hvcwatch import utils
 from hvcwatch.config import Settings
+from hvcwatch.logging_config import LOGGER_NAME
 from hvcwatch.utils import MASSIVE_TICKER_URL
-from tests.helpers import WEBHOOK_URL
+from tests.helpers import WEBHOOK_URL, ScriptExhausted
 
 # 📦 `settings` is bound by name in each of these modules (`from ... import settings`),
 # so patching hvcwatch.config.settings alone would change none of them.
@@ -199,3 +204,137 @@ def massive(
         httpx2_mock.add_response(url=url, json={"results": results})
 
     return _register
+
+
+class FetchCall(NamedTuple):
+    """📝 One `fetch` call as the code made it: criteria as text, plus mark_seen."""
+
+    criteria: str
+    mark_seen: bool
+
+
+class FakeIdle:
+    """💤 Stand-in for `MailBox.idle`: a context manager whose `poll` follows a script."""
+
+    def __init__(self, polls: Sequence[list[bytes]]) -> None:
+        """Store the scripted poll results, one per `poll` call, in order."""
+        self._polls = list(polls)
+        self.timeouts: list[float | None] = []  # 🕒 The timeout of every poll, in order
+
+    def __enter__(self) -> Self:
+        """Return self, as the real idle object does."""
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        """Return None so exceptions, including ScriptExhausted, still propagate."""
+
+    def poll(self, timeout: float | None) -> list[bytes]:
+        """
+        Record the timeout and return the next scripted result.
+
+        An empty result means the IDLE wait timed out with no new mail. Raises
+        ScriptExhausted when the script has no more polls.
+        """
+        self.timeouts.append(timeout)
+        if not self._polls:
+            raise ScriptExhausted("no poll scripted")
+        return self._polls.pop(0)
+
+
+class FakeMailBox:
+    """
+    📭 Stand-in for imap_tools MailBox, scripted one call at a time.
+
+    Models the calls production makes: `MailBox(host).login(...)` used as a
+    context manager, `mailbox.idle` used as a context manager with `poll`, and
+    `mailbox.fetch(criteria, mark_seen=...)`. Each `fetch` consumes one list of
+    messages from `fetches`. Each `poll` consumes one result from `polls`. Both
+    raise ScriptExhausted when their script is empty.
+    """
+
+    def __init__(
+        self,
+        fetches: Sequence[Sequence[MailMessage]] = (),
+        polls: Sequence[list[bytes]] = (),
+    ) -> None:
+        """Store the scripts. `host` is filled in when the code calls MailBox(host)."""
+        self.host: str | None = None
+        self.login_args: tuple[str, str, str] | None = None
+        self.fetch_calls: list[FetchCall] = []
+        self.logged_out = False
+        self.idle = FakeIdle(polls)
+        self._fetches = [list(batch) for batch in fetches]
+
+    def login(self, user: str, password: str, folder: str) -> FakeMailBox:
+        """🔑 Record the login arguments and return self, as MailBox.login does."""
+        self.login_args = (user, password, folder)
+        return self
+
+    def __enter__(self) -> Self:
+        """Return self, as MailBox does inside `with`."""
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        """🚪 Mark the session closed. Returns None so exceptions still propagate."""
+        self.logged_out = True
+
+    def fetch(
+        self, criteria: object, *, mark_seen: bool = True
+    ) -> Iterator[MailMessage]:
+        """
+        Record the call and return the next scripted batch of messages.
+
+        Raises ScriptExhausted when no batch is left.
+        """
+        self.fetch_calls.append(FetchCall(str(criteria), mark_seen))
+        if not self._fetches:
+            raise ScriptExhausted("no fetch scripted")
+        return iter(self._fetches.pop(0))
+
+
+@pytest.fixture
+def fake_mailbox(monkeypatch: pytest.MonkeyPatch) -> Callable[..., FakeMailBox]:
+    """
+    📭 Factory: `fake_mailbox(fetches=[[...]], polls=[[...]])` replaces MailBox.
+
+    Returns the FakeMailBox so tests can read what the code did to it. Each
+    `MailBox(host)` call in hvcwatch.email_monitor returns that same fake and
+    records the host. Undone automatically at the end of the test.
+    """
+
+    def _make(
+        fetches: Sequence[Sequence[MailMessage]] = (),
+        polls: Sequence[list[bytes]] = (),
+    ) -> FakeMailBox:
+        mailbox = FakeMailBox(fetches, polls)
+
+        def _connect(host: str) -> FakeMailBox:
+            mailbox.host = host  # 🏷️ Record the server the code asked for
+            return mailbox
+
+        monkeypatch.setattr("hvcwatch.email_monitor.MailBox", _connect)
+        return mailbox
+
+    return _make
+
+
+@pytest.fixture
+def hvcwatch_logger() -> Iterator[Logger]:
+    """
+    📜 Give the test a clean hvcwatch logger and restore it afterwards.
+
+    Handlers the test adds are closed at teardown. The level and the handlers
+    that were there before the test come back.
+    """
+    logger = getLogger(LOGGER_NAME)
+    saved_level = logger.level
+    saved_handlers = logger.handlers[:]
+    for handler in saved_handlers:
+        logger.removeHandler(handler)
+    yield logger
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+        handler.close()
+    for handler in saved_handlers:
+        logger.addHandler(handler)
+    logger.setLevel(saved_level)

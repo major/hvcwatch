@@ -15,6 +15,15 @@ WEBHOOK_URL = (
 SECOND_URL = "https://discord.com/api/webhooks/second"  # 🔗 A second, extra webhook
 
 
+class ScriptExhausted(Exception):
+    """
+    🛑 Raised by the fake IMAP mailbox when the test's script has run out.
+
+    A monitor loop never ends on its own, so the fake raises this instead of
+    returning empty results forever. Tests catch it with `pytest.raises`.
+    """
+
+
 def posts_to(http_mock: responses.RequestsMock, url: str) -> list[dict[str, Any]]:
     """📬 JSON bodies of every POST sent to `url`, in order."""
     bodies: list[dict[str, Any]] = []
