@@ -1,0 +1,32 @@
+"""Shared test constants and plain helpers that tests import by name.
+
+Fixtures live in tests/conftest.py. This module holds only values and helper
+functions that a test calls directly.
+"""
+
+import json
+from typing import Any
+
+import responses
+
+WEBHOOK_URL = (
+    "https://discord.com/api/webhooks/test"  # 🔗 Matches the shared `settings`
+)
+
+
+def posts_to(http_mock: responses.RequestsMock, url: str) -> list[dict[str, Any]]:
+    """📬 JSON bodies of every POST sent to `url`, in order."""
+    bodies: list[dict[str, Any]] = []
+    for call in http_mock.calls:
+        request = call.request
+        if request.method != "POST" or (request.url or "").split("?")[0] != url:
+            continue
+        assert isinstance(request.body, bytes)  # 📦 requests encodes json= as bytes
+        bodies.append(json.loads(request.body))
+    return bodies
+
+
+def only_embed(payload: dict[str, Any]) -> dict[str, Any]:
+    """🪟 The single embed in a webhook payload."""
+    assert len(payload["embeds"]) == 1
+    return payload["embeds"][0]

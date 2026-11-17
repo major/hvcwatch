@@ -5,22 +5,28 @@ Autouse fixtures (nothing to request, they always run):
     settings         Real, frozen Settings bound into every module that imports it.
     http_mock        `responses` is active, so an unregistered HTTP call raises.
     _clear_ticker_overview_cache   Empties utils._lookup_ticker_overview before and after.
+    sleeps                         Records retry waits instead of sleeping, jitter off.
 
 Opt-in fixtures (request them by name):
     override_settings   Factory that swaps in a changed copy of `settings`.
     db_path             The SQLite file used by the default `settings`.
+    fake_discord        Factory that registers a Discord webhook that accepts POSTs.
+    massive             Factory that fakes the Massive ticker overview endpoint.
 """
 
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 import responses
 
 from hvcwatch import utils
 from hvcwatch.config import Settings
+from hvcwatch.utils import MASSIVE_TICKER_URL
+from tests.helpers import WEBHOOK_URL
 
 # 📦 `settings` is bound by name in each of these modules (`from ... import settings`),
 # so patching hvcwatch.config.settings alone would change none of them.
@@ -110,3 +116,57 @@ def _clear_ticker_overview_cache() -> Iterator[None]:
     utils._lookup_ticker_overview.cache_clear()
     yield
     utils._lookup_ticker_overview.cache_clear()
+
+
+@pytest.fixture
+def fake_discord(http_mock: responses.RequestsMock) -> Callable[..., None]:
+    """
+    🎭 Factory: `fake_discord(url)` registers a Discord webhook that accepts POSTs.
+
+    Replies 200 with a JSON body by default. Any status works, 429 included,
+    because the `sleeps` fixture stops the retry waits from really sleeping.
+    """
+
+    def _register(url: str = WEBHOOK_URL, status: int = 200, **reply: Any) -> None:
+        if "body" not in reply:  # 🧩 responses rejects json and body together
+            reply.setdefault("json", {"id": "1"})
+        http_mock.post(url, status=status, **reply)
+
+    return _register
+
+
+@pytest.fixture(autouse=True)
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """
+    💤 Record every retry wait instead of sleeping.
+
+    Also turns jitter off, so the waits are exact (1, 2, 4 seconds) and no
+    test really sleeps. Returns the sleep mock for assertions.
+    """
+    sleep = MagicMock()
+    monkeypatch.setattr("hvcwatch.notification.time.sleep", sleep)
+    monkeypatch.setattr("hvcwatch.notification._with_jitter", lambda delay: delay)
+    return sleep
+
+
+@pytest.fixture
+def massive(
+    http_mock: responses.RequestsMock, override_settings: Callable[..., Settings]
+) -> Callable[..., None]:
+    """
+    🏢 Factory: `massive("AAPL", "Apple Inc.", "CS")` fakes the Massive overview call.
+
+    Sets a Massive API key (without one, lookups are skipped), then registers the
+    ticker endpoint. Pass name=None to fake a 404 (unknown ticker).
+    """
+    override_settings(massive_api_key="test-key")
+
+    def _register(ticker: str, name: str | None, type_: str | None = None) -> None:
+        url = MASSIVE_TICKER_URL.format(ticker=ticker.upper())
+        if name is None:
+            http_mock.get(url, status=404, json={"status": "NOT_FOUND"})
+            return
+        results = {"name": name, **({"type": type_} if type_ else {})}
+        http_mock.get(url, json={"results": results})
+
+    return _register
