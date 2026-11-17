@@ -34,18 +34,18 @@ class TestSettingsBasic:
 
 
 class TestSettingsMassiveApiKey:
-    """Test the Massive API key and its legacy POLYGON_API_KEY alias."""
+    """Test loading the Massive API key from the environment."""
 
-    def test_polygon_api_key_env_var_populates_massive_api_key(self, base_env):
-        """✅ Existing .env files with POLYGON_API_KEY keep working."""
-        # Arrange: 🧪 add the legacy variable to the env dict
-        env = {**base_env, "POLYGON_API_KEY": "legacy-key"}
+    def test_massive_api_key_env_var_populates_massive_api_key(self, base_env):
+        """🔑 MASSIVE_API_KEY populates massive_api_key."""
+        # Arrange
+        env = {**base_env, "MASSIVE_API_KEY": "massive-key"}
 
         # Act
         settings = Settings.from_env(env=env)
 
         # Assert
-        assert settings.massive_api_key == "legacy-key"
+        assert settings.massive_api_key == "massive-key"
 
 
 class TestSettingsDefaults:
