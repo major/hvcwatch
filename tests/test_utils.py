@@ -1,43 +1,23 @@
 import json
+from datetime import UTC, date, datetime
+from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
+
 import pytest
 import requests
-from unittest.mock import Mock, patch
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
-import pandas as pd
 
 from hvcwatch import utils
 from hvcwatch.utils import (
+    _get_nyse_calendar,
     extract_tickers,
     extract_timeframe,
     get_company_name,
     get_ticker_type,
     is_market_hours_or_near,
-    _get_nyse_calendar,
 )
 
-
-@pytest.fixture
-def nyc_timezone():
-    """NYC timezone fixture."""
-    return ZoneInfo("America/New_York")
-
-
-@pytest.fixture
-def mock_market_times(nyc_timezone):
-    """Return market open/close times as pandas Timestamps for today."""
-    today = datetime.now(nyc_timezone).date()
-    market_open = pd.Timestamp(
-        datetime.combine(
-            today, datetime.min.time().replace(hour=9, minute=30), tzinfo=nyc_timezone
-        )
-    )
-    market_close = pd.Timestamp(
-        datetime.combine(
-            today, datetime.min.time().replace(hour=16, minute=0), tzinfo=nyc_timezone
-        )
-    )
-    return market_open, market_close
+# 🗽 Real New York wall-clock zone. The market tests use the real XNYS calendar.
+NYC = ZoneInfo("America/New_York")
 
 
 class TestExtractTickers:
@@ -99,124 +79,331 @@ class TestExtractTimeframe:
 
 
 class TestIsMarketHoursOrNear:
-    """Test cases for is_market_hours_or_near function."""
+    """Test cases for is_market_hours_or_near function.
 
-    @pytest.fixture(autouse=True)
-    def clear_calendar_cache(self):
-        """Clear the calendar cache before each test."""
-        _get_nyse_calendar.cache_clear()
-        yield
-        _get_nyse_calendar.cache_clear()
+    These tests use the real XNYS calendar on fixed 2026 dates, so results do not
+    depend on today's date or on a mocked calendar.
+    """
 
-    @pytest.fixture
-    def mock_calendar_open(self, mock_market_times):
-        """Mock exchange calendar for an open market day."""
-        market_open, market_close = mock_market_times
-        with patch("hvcwatch.utils._get_nyse_calendar") as mock_get_cal:
-            mock_nyse = Mock()
-            mock_nyse.is_session.return_value = True
-            mock_nyse.session_open.return_value = market_open
-            mock_nyse.session_close.return_value = market_close
-            mock_get_cal.return_value = mock_nyse
-            yield mock_nyse
+    @pytest.mark.parametrize(
+        "day,expected",
+        [
+            pytest.param(date(2026, 1, 6), True, id="normal-tuesday"),
+            pytest.param(date(2026, 3, 9), True, id="day-after-dst-start"),
+            pytest.param(date(2026, 11, 2), True, id="day-after-dst-end"),
+            pytest.param(date(2026, 11, 27), True, id="early-close-friday"),
+            pytest.param(date(2026, 1, 10), False, id="weekend"),
+            pytest.param(date(2026, 1, 19), False, id="mlk-day"),
+            pytest.param(date(2026, 12, 25), False, id="christmas"),
+        ],
+    )
+    def test_fixed_dates_match_the_xnys_calendar(self, day, expected):
+        """Guard the fixed 2026 dates so a wrong date fails here, not as a boundary failure."""
+        assert _get_nyse_calendar().is_session(day) == expected
 
-    @pytest.fixture
-    def mock_calendar_closed(self):
-        """Mock exchange calendar for a closed market day."""
-        with patch("hvcwatch.utils._get_nyse_calendar") as mock_get_cal:
-            mock_nyse = Mock()
-            mock_nyse.is_session.return_value = False
-            mock_get_cal.return_value = mock_nyse
-            yield mock_nyse
+    @pytest.mark.parametrize(
+        "check_time,hours,expected",
+        [
+            pytest.param(
+                datetime(2026, 1, 6, 9, 29, 59, 999999, tzinfo=NYC),
+                0,
+                False,
+                id="one-microsecond-before-open",
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 9, 30, tzinfo=NYC), 0, True, id="open-instant"
+            ),
+            pytest.param(datetime(2026, 1, 6, 14, 0, tzinfo=NYC), 0, True, id="midday"),
+            pytest.param(
+                datetime(2026, 1, 6, 16, 0, tzinfo=NYC), 0, True, id="close-instant"
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 16, 0, 0, 1, tzinfo=NYC),
+                0,
+                False,
+                id="one-microsecond-after-close",
+            ),
+        ],
+    )
+    def test_regular_session_boundaries(self, check_time, hours, expected):
+        """Open and close instants are inside the session. One microsecond outside is not."""
+        result = is_market_hours_or_near(check_time, hours=hours)
 
-    def test_market_currently_open(self, mock_calendar_open, nyc_timezone):
-        """Test when market is currently open."""
-        market_day = datetime.now(nyc_timezone).date()
-        test_time = datetime.combine(
-            market_day,
-            datetime.min.time().replace(hour=14, minute=0),
-            tzinfo=nyc_timezone,
-        )
+        assert result is expected
 
-        result = is_market_hours_or_near(test_time)
-        assert result is True
+    @pytest.mark.parametrize(
+        "check_time,hours,expected",
+        [
+            pytest.param(
+                datetime(2026, 1, 6, 8, 30, tzinfo=NYC),
+                1,
+                True,
+                id="exactly-one-hour-before-open",
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 8, 29, 59, tzinfo=NYC),
+                1,
+                False,
+                id="one-second-before-pre-window",
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 17, 0, tzinfo=NYC),
+                1,
+                True,
+                id="exactly-one-hour-after-close",
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 17, 0, 1, tzinfo=NYC),
+                1,
+                False,
+                id="one-second-after-post-window",
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 7, 30, tzinfo=NYC),
+                3,
+                True,
+                id="two-hours-before-open-with-3h-buffer",
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 18, 0, tzinfo=NYC),
+                3,
+                True,
+                id="two-hours-after-close-with-3h-buffer",
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 4, 30, tzinfo=NYC),
+                3,
+                False,
+                id="five-hours-before-open-with-3h-buffer",
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 21, 0, tzinfo=NYC),
+                3,
+                False,
+                id="five-hours-after-close-with-3h-buffer",
+            ),
+        ],
+    )
+    def test_near_open_and_close_buffers(self, check_time, hours, expected):
+        """The pre-open and post-close windows include their edges and nothing beyond."""
+        result = is_market_hours_or_near(check_time, hours=hours)
 
-    def test_market_closed_but_near_open(self, mock_calendar_open, nyc_timezone):
-        """Test when market is closed but within hours before open."""
-        market_day = datetime.now(nyc_timezone).date()
-        test_time = datetime.combine(
-            market_day,
-            datetime.min.time().replace(hour=7, minute=30),
-            tzinfo=nyc_timezone,
-        )
+        assert result is expected
 
-        result = is_market_hours_or_near(test_time, hours=3)
-        assert result is True
+    @pytest.mark.parametrize(
+        "check_time,hours,expected",
+        [
+            pytest.param(
+                datetime(2026, 1, 6, 16, 30, tzinfo=NYC), 0, False, id="no-buffer"
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 16, 30, tzinfo=NYC), 1, True, id="one-hour-buffer"
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 16, 30, tzinfo=NYC),
+                3,
+                True,
+                id="three-hour-buffer",
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 16, 30, tzinfo=NYC), 6, True, id="six-hour-buffer"
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 22, 30, tzinfo=NYC),
+                6,
+                False,
+                id="past-six-hour-buffer",
+            ),
+        ],
+    )
+    def test_hour_buffers_after_close(self, check_time, hours, expected):
+        """The post-close buffer grows with hours. Close is 16:00, so 6h ends at 22:00."""
+        result = is_market_hours_or_near(check_time, hours=hours)
 
-    def test_market_closed_but_near_close(self, mock_calendar_open, nyc_timezone):
-        """Test when market is closed but within hours after close."""
-        market_day = datetime.now(nyc_timezone).date()
-        test_time = datetime.combine(
-            market_day,
-            datetime.min.time().replace(hour=18, minute=0),
-            tzinfo=nyc_timezone,
-        )
+        assert result is expected
 
-        result = is_market_hours_or_near(test_time, hours=3)
-        assert result is True
+    @pytest.mark.parametrize(
+        "check_time,expected",
+        [
+            pytest.param(
+                datetime(2026, 1, 6, 8, 45, tzinfo=NYC), True, id="within-default-hour"
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 8, 15, tzinfo=NYC),
+                False,
+                id="beyond-default-hour",
+            ),
+        ],
+    )
+    def test_default_hours_is_one_hour(self, check_time, expected):
+        """Omitting hours uses a one-hour buffer."""
+        result = is_market_hours_or_near(check_time)
 
-    def test_market_closed_too_far_before(self, mock_calendar_open, nyc_timezone):
-        """Test when market is closed and too far before open."""
-        market_day = datetime.now(nyc_timezone).date()
-        test_time = datetime.combine(
-            market_day,
-            datetime.min.time().replace(hour=4, minute=30),
-            tzinfo=nyc_timezone,
-        )
+        assert result is expected
 
-        result = is_market_hours_or_near(test_time, hours=3)
+    @pytest.mark.parametrize(
+        "check_time,hours,expected",
+        [
+            # 🕗 Naive input is New York wall-clock time, so 20:00 is after close.
+            pytest.param(
+                datetime(2026, 1, 6, 14, 0), 0, True, id="naive-is-new-york-midday"
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 20, 0),
+                0,
+                False,
+                id="naive-20-00-is-not-utc",
+            ),
+            # 🌍 UTC input is converted to New York first.
+            pytest.param(
+                datetime(2026, 1, 6, 19, 0, tzinfo=UTC),
+                0,
+                True,
+                id="utc-1900-is-1400-new-york",
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 14, 29, 59, tzinfo=UTC),
+                0,
+                False,
+                id="utc-one-second-before-open",
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 14, 30, tzinfo=UTC),
+                0,
+                True,
+                id="utc-open-instant",
+            ),
+            pytest.param(
+                datetime(2026, 1, 6, 22, 0, tzinfo=UTC),
+                0,
+                False,
+                id="utc-2200-is-1700-new-york",
+            ),
+        ],
+    )
+    def test_naive_and_utc_inputs_are_normalized(self, check_time, hours, expected):
+        """Naive input is New York time. Aware input is converted to New York."""
+        result = is_market_hours_or_near(check_time, hours=hours)
+
+        assert result is expected
+
+    @pytest.mark.parametrize(
+        "check_time",
+        [
+            pytest.param(datetime(2026, 1, 10, 12, 0, tzinfo=NYC), id="weekend-noon"),
+            pytest.param(datetime(2026, 1, 10, 9, 0, tzinfo=NYC), id="weekend-0900"),
+            pytest.param(datetime(2026, 1, 19, 12, 0, tzinfo=NYC), id="mlk-day-noon"),
+            pytest.param(datetime(2026, 1, 19, 9, 0, tzinfo=NYC), id="mlk-day-0900"),
+            pytest.param(
+                datetime(2026, 12, 25, 12, 0, tzinfo=NYC), id="christmas-noon"
+            ),
+            pytest.param(datetime(2026, 12, 25, 9, 0, tzinfo=NYC), id="christmas-0900"),
+        ],
+    )
+    def test_closed_days_are_never_near_the_window(self, check_time):
+        """A closed day has no window, even with a 3-hour buffer."""
+        result = is_market_hours_or_near(check_time, hours=3)
+
         assert result is False
 
-    def test_market_closed_too_far_after(self, mock_calendar_open, nyc_timezone):
-        """Test when market is closed and too far after close."""
-        market_day = datetime.now(nyc_timezone).date()
-        test_time = datetime.combine(
-            market_day,
-            datetime.min.time().replace(hour=21, minute=0),
-            tzinfo=nyc_timezone,
-        )
+    # 🌗 Mar 9 and Nov 2 are the days after the DST changes. EDT is UTC-4, EST is UTC-5.
+    @pytest.mark.parametrize(
+        "check_time,hours,expected",
+        [
+            pytest.param(
+                datetime(2026, 3, 9, 13, 29, 59, tzinfo=UTC),
+                0,
+                False,
+                id="mar-9-one-second-before-open",
+            ),
+            pytest.param(
+                datetime(2026, 3, 9, 13, 30, tzinfo=UTC),
+                0,
+                True,
+                id="mar-9-open-edt",
+            ),
+            pytest.param(
+                datetime(2026, 3, 9, 20, 0, tzinfo=UTC),
+                0,
+                True,
+                id="mar-9-close-edt",
+            ),
+            pytest.param(
+                datetime(2026, 3, 9, 20, 0, 0, 1, tzinfo=UTC),
+                0,
+                False,
+                id="mar-9-one-microsecond-after-close",
+            ),
+            # 🕛 00:30 EDT on Mar 9 is 23:30 EST on Mar 8, a closed Sunday in fixed UTC-5.
+            pytest.param(
+                datetime(2026, 3, 9, 4, 30, tzinfo=UTC),
+                9,
+                True,
+                id="mar-9-pre-window-reaches-0030-edt",
+            ),
+            pytest.param(
+                datetime(2026, 11, 2, 14, 29, 59, tzinfo=UTC),
+                0,
+                False,
+                id="nov-2-one-second-before-open",
+            ),
+            pytest.param(
+                datetime(2026, 11, 2, 14, 30, tzinfo=UTC),
+                0,
+                True,
+                id="nov-2-open-est",
+            ),
+            pytest.param(
+                datetime(2026, 11, 2, 21, 0, tzinfo=UTC),
+                0,
+                True,
+                id="nov-2-close-est",
+            ),
+            pytest.param(
+                datetime(2026, 11, 2, 21, 0, 0, 1, tzinfo=UTC),
+                0,
+                False,
+                id="nov-2-one-microsecond-after-close",
+            ),
+        ],
+    )
+    def test_dst_transitions_use_real_offsets(self, check_time, hours, expected):
+        """Open and close follow the real offset on each side of the DST change."""
+        result = is_market_hours_or_near(check_time, hours=hours)
 
-        result = is_market_hours_or_near(test_time, hours=3)
-        assert result is False
+        assert result is expected
 
-    def test_market_holiday(self, mock_calendar_closed, nyc_timezone):
-        """Test when market is closed for holiday."""
-        test_time = datetime(2024, 12, 25, 12, 0, tzinfo=nyc_timezone)
+    @pytest.mark.parametrize(
+        "check_time,hours,expected",
+        [
+            pytest.param(
+                datetime(2026, 11, 27, 13, 0, tzinfo=NYC), 0, True, id="close-1300"
+            ),
+            pytest.param(
+                datetime(2026, 11, 27, 13, 0, 0, 1, tzinfo=NYC),
+                0,
+                False,
+                id="one-microsecond-after-1300",
+            ),
+            pytest.param(
+                datetime(2026, 11, 27, 14, 0, tzinfo=NYC),
+                1,
+                True,
+                id="one-hour-after-early-close",
+            ),
+            pytest.param(
+                datetime(2026, 11, 27, 15, 0, tzinfo=NYC),
+                1,
+                False,
+                id="regular-close-would-say-true",
+            ),
+        ],
+    )
+    def test_early_close_shortens_the_session(self, check_time, hours, expected):
+        """Nov 27 closes at 13:00, so the post-close window ends at 14:00 with 1h."""
+        result = is_market_hours_or_near(check_time, hours=hours)
 
-        result = is_market_hours_or_near(test_time)
-        assert result is False
-
-    def test_naive_datetime_input(self, mock_calendar_open):
-        """Test with naive datetime input (assumes NYC timezone)."""
-        market_day = datetime.now().date()
-        test_time = datetime.combine(
-            market_day, datetime.min.time().replace(hour=14, minute=0)
-        )
-
-        result = is_market_hours_or_near(test_time)
-        assert isinstance(result, bool)
-
-    def test_utc_datetime_input(self, mock_calendar_open):
-        """Test with UTC timezone-aware datetime input."""
-        market_day = datetime.now(timezone.utc).date()
-        test_time = datetime.combine(
-            market_day,
-            datetime.min.time().replace(hour=19, minute=0),
-            tzinfo=timezone.utc,
-        )
-
-        result = is_market_hours_or_near(test_time)
-        assert isinstance(result, bool)
+        assert result is expected
 
     def test_check_time_is_required(self):
         """check_time has no default, so there is no stale import-time clock read."""
@@ -237,20 +424,6 @@ class TestIsMarketHoursOrNear:
 
         assert result is False
         assert "outside the NYSE calendar range" in caplog.text
-
-    @pytest.mark.parametrize("hours", [0, 1, 3, 6])
-    def test_different_hour_buffers(self, mock_calendar_open, nyc_timezone, hours):
-        """Test with different hour buffer values."""
-        market_day = datetime.now(nyc_timezone).date()
-        safe_hour = min(16 + min(hours, 7), 23)
-        test_time = datetime.combine(
-            market_day,
-            datetime.min.time().replace(hour=safe_hour, minute=30),
-            tzinfo=nyc_timezone,
-        )
-
-        result = is_market_hours_or_near(test_time, hours=hours)
-        assert isinstance(result, bool)
 
 
 OK_BODY = b'{"status":"OK","results":{"name":"Apple Inc.","ticker":"AAPL"}}'
