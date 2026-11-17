@@ -323,7 +323,7 @@ class TestProcessEmailMessage:
     def test_weekly_alert_sends_and_records(
         self, http_mock, fake_discord, massive, db_path
     ):
-        """📬 A new weekly ticker sends one embed with the company name and records it."""
+        """📬 A new weekly ticker sends one embed titled with the company name and records it."""
         # Arrange
         fake_discord()
         massive("AAPL", "Apple Inc.", "CS")
@@ -335,10 +335,8 @@ class TestProcessEmailMessage:
         posts = posts_to(http_mock, WEBHOOK_URL)
         assert len(posts) == 1
         embed = only_embed(posts[0])
-        assert embed["title"] == "AAPL"
-        assert embed["description"] == (
-            "**Apple Inc.**\n**Type:** CS\n**Timeframe:** Weekly"
-        )
+        assert embed["title"] == "Apple Inc."
+        assert embed["description"] == "**AAPL** · CS · Weekly"
         assert read_alert_rows(db_path) == [("AAPL", "weekly", "2024-12-02")]
 
     def test_duplicate_weekly_email_suppressed(self, http_mock, fake_discord, db_path):

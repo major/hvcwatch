@@ -1,17 +1,20 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx2
 import pytest
 
 from hvcwatch.utils import (
+    MarketStats,
     _get_nyse_calendar,
     extract_tickers,
     extract_timeframe,
     get_company_name,
+    get_market_stats,
     get_ticker_type,
     is_market_hours_or_near,
 )
+from tests.helpers import daily_bar
 
 # 🗽 Real New York wall-clock zone. The market tests use the real XNYS calendar.
 NYC = ZoneInfo("America/New_York")
@@ -698,3 +701,165 @@ def test_server_error_logs_warning_without_leaking_key(
         for message in warning_messages(caplog)
     )
     assert "test-key" not in caplog.text
+
+
+class TestGetMarketStats:
+    """Test cases for get_market_stats, which reads Massive daily bars (newest first)."""
+
+    def test_price_is_today_close_and_averages_skip_today(
+        self, api_key, frozen_today, massive_bars
+    ):
+        """✅ Price is today's close. The 20-day averages skip today's bar, which may still trade."""
+        # Arrange: today trades on 1M shares at 50, and 20 prior days sit at 10 on 100 shares
+        today_bar = daily_bar(frozen_today, close=50.0, volume=1_000_000)
+        prior = [
+            daily_bar(frozen_today - timedelta(days=k), close=10.0, volume=100)
+            for k in range(1, 21)
+        ]
+        massive_bars([today_bar, *prior])
+
+        # Act
+        stats = get_market_stats("AAPL")
+
+        # Assert: if today's bar counted, the averages would be far from 100 and 1000
+        assert stats == MarketStats(
+            price=50.0, avg_volume=100.0, avg_dollar_volume=1000.0
+        )
+
+    def test_weekend_uses_newest_close_and_twenty_newest_bars(
+        self, api_key, frozen_today, massive_bars
+    ):
+        """✅ With no bar for today, the price is the newest close and the averages use the 20 newest bars."""
+        # Arrange: Friday (close 12) is the newest of 21 bars. The 21st, oldest bar is an outlier
+        friday = frozen_today - timedelta(days=3)
+        newest = daily_bar(friday, close=12.0, volume=100)
+        prior = [
+            daily_bar(friday - timedelta(days=k), close=10.0, volume=100)
+            for k in range(1, 20)
+        ]
+        outlier = daily_bar(friday - timedelta(days=20), close=999.0, volume=1_000_000)
+        massive_bars([newest, *prior, outlier])
+
+        # Act
+        stats = get_market_stats("AAPL")
+
+        # Assert: 12 and nineteen 10s average to 1010 dollars per bar, and the outlier is left out
+        assert stats == MarketStats(
+            price=12.0, avg_volume=100.0, avg_dollar_volume=1010.0
+        )
+
+    @pytest.mark.parametrize("prior_count", [0, 1, 19], ids=["none", "one", "nineteen"])
+    def test_fewer_than_twenty_prior_bars_gives_price_only(
+        self, api_key, frozen_today, massive_bars, prior_count
+    ):
+        """✅ Under 20 prior bars the price is still returned, and both averages are None."""
+        # Arrange
+        today_bar = daily_bar(frozen_today, close=50.0, volume=1_000_000)
+        prior = [
+            daily_bar(frozen_today - timedelta(days=k), close=10.0, volume=100)
+            for k in range(1, prior_count + 1)
+        ]
+        massive_bars([today_bar, *prior])
+
+        # Act
+        stats = get_market_stats("AAPL")
+
+        # Assert
+        assert stats == MarketStats(price=50.0, avg_volume=None, avg_dollar_volume=None)
+
+    @pytest.mark.parametrize(
+        "body",
+        [b'{"status":"OK","results":[]}', b'{"status":"OK"}'],
+        ids=["empty-results", "missing-results"],
+    )
+    def test_no_results_gives_all_none(self, api_key, massive_bars, body):
+        """✅ Empty or missing results are not an error: MarketStats with every field None."""
+        # Arrange
+        massive_bars(body=body)
+
+        # Act
+        stats = get_market_stats("AAPL")
+
+        # Assert
+        assert stats == MarketStats(price=None, avg_volume=None, avg_dollar_volume=None)
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            pytest.param({"status_code": 404}, id="404"),
+            pytest.param({"status_code": 500}, id="500"),
+            pytest.param({"error": httpx2.TimeoutException("timed out")}, id="timeout"),
+            pytest.param(
+                {"error": httpx2.ConnectError("no route")}, id="network-error"
+            ),
+            pytest.param({"body": b"not json"}, id="invalid-json"),
+        ],
+    )
+    def test_failures_return_none_and_log_warning(
+        self, api_key, massive_bars, caplog, reply
+    ):
+        """📜 Any failure returns None and logs a warning with the ticker. It never raises."""
+        # Arrange
+        massive_bars(**reply)
+
+        # Act
+        with caplog.at_level("INFO", logger="hvcwatch.utils"):
+            stats = get_market_stats("AAPL")
+
+        # Assert
+        assert stats is None
+        assert any(
+            message.startswith("Market stats lookup failed ticker=AAPL")
+            for message in warning_messages(caplog)
+        )
+
+    def test_missing_api_key_skips_http_call_and_warns(self, httpx2_mock, caplog):
+        """✅ Without a key, no HTTP call is made, the result is None, and a warning is logged."""
+        # Act
+        with caplog.at_level("INFO", logger="hvcwatch.utils"):
+            stats = get_market_stats("AAPL")
+
+        # Assert
+        assert stats is None
+        assert len(httpx2_mock.get_requests()) == 0
+        assert (
+            "Massive API key not set, skipping market stats lookup"
+            in warning_messages(caplog)
+        )
+
+    def test_request_uses_uppercase_ticker_bearer_header_and_daily_params(
+        self, api_key, frozen_today, massive_bars, httpx2_mock
+    ):
+        """✅ One GET for the 45-day daily range, with the key in the header and never in the URL."""
+        # Arrange
+        massive_bars([])
+
+        # Act
+        get_market_stats("aapl")
+
+        # Assert: 45 days before 2026-11-16 is 2026-10-02
+        (request,) = httpx2_mock.get_requests()
+        assert (
+            request.url.path == "/v2/aggs/ticker/AAPL/range/1/day/2026-10-02/2026-11-16"
+        )
+        assert dict(request.url.params) == {
+            "adjusted": "true",
+            "sort": "desc",
+            "limit": "21",
+        }
+        assert request.headers["Authorization"] == "Bearer test-key"
+        assert "test-key" not in str(request.url)
+
+    def test_each_call_makes_its_own_http_request(
+        self, api_key, frozen_today, massive_bars, httpx2_mock
+    ):
+        """🔄 Market stats are not cached, so two calls cost two HTTP requests."""
+        # Arrange
+        massive_bars([])
+
+        # Act
+        get_market_stats("AAPL")
+        get_market_stats("AAPL")
+
+        # Assert
+        assert len(httpx2_mock.get_requests()) == 2
