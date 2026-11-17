@@ -14,13 +14,33 @@ class TestSettingsBasic:
             fastmail_user="test@example.com",
             fastmail_pass="password123",
             discord_webhook_url="https://discord.com/api/webhooks/test",
-            polygon_api_key="test-api-key",
+            massive_api_key="test-api-key",
         )
 
         assert settings.fastmail_user == "test@example.com"
         assert settings.fastmail_pass == "password123"
         assert settings.discord_webhook_url == "https://discord.com/api/webhooks/test"
-        assert settings.polygon_api_key == "test-api-key"
+        assert settings.massive_api_key == "test-api-key"
+
+
+class TestSettingsMassiveApiKey:
+    """Test the Massive API key and its legacy POLYGON_API_KEY alias."""
+
+    def test_polygon_api_key_env_var_populates_massive_api_key(self, monkeypatch):
+        """✅ Existing .env files with POLYGON_API_KEY keep working."""
+        # Arrange: 🧹 clear MASSIVE_API_KEY so a developer's shell cannot win the alias lookup
+        monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
+        monkeypatch.setenv("POLYGON_API_KEY", "legacy-key")
+
+        # Act
+        settings = Settings(
+            fastmail_user="test@example.com",
+            fastmail_pass="password123",
+            discord_webhook_url="https://discord.com/api/webhooks/test",
+        )
+
+        # Assert
+        assert settings.massive_api_key == "legacy-key"
 
 
 class TestSettingsDefaults:
@@ -32,7 +52,7 @@ class TestSettingsDefaults:
             fastmail_user="test@example.com",
             fastmail_pass="password123",
             discord_webhook_url="https://discord.com/api/webhooks/test",
-            polygon_api_key="test-api-key",
+            massive_api_key="test-api-key",
         )
 
         assert settings.log_level == "INFO"
@@ -43,7 +63,7 @@ class TestSettingsDefaults:
             fastmail_user="test@example.com",
             fastmail_pass="password123",
             discord_webhook_url="https://discord.com/api/webhooks/test",
-            polygon_api_key="test-api-key",
+            massive_api_key="test-api-key",
         )
 
         assert settings.imap_host == "imap.fastmail.com"
@@ -56,7 +76,7 @@ class TestSettingsDefaults:
             fastmail_user="test@example.com",
             fastmail_pass="password123",
             discord_webhook_url="https://discord.com/api/webhooks/test",
-            polygon_api_key="test-api-key",
+            massive_api_key="test-api-key",
         )
 
         assert settings.transparent_png == "https://major.io/transparent.png"
@@ -71,7 +91,7 @@ class TestSettingsDiscordConfiguration:
             fastmail_user="test@example.com",
             fastmail_pass="password123",
             discord_webhook_url="https://discord.com/api/webhooks/test",
-            polygon_api_key="test-api-key",
+            massive_api_key="test-api-key",
         )
 
         assert settings.discord_webhook_url is not None

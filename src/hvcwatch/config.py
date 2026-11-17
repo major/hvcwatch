@@ -1,6 +1,6 @@
 """Configuration values for the stocknews package."""
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,8 +22,11 @@ class Settings(BaseSettings):
         None, description="Comma-separated Discord webhook URLs"
     )
 
-    polygon_api_key: str | None = Field(
-        None, description="Polygon.io API key (no longer used)"
+    # 🔑 POLYGON_API_KEY is still accepted so existing .env files keep loading
+    massive_api_key: str | None = Field(
+        None,
+        validation_alias=AliasChoices("massive_api_key", "polygon_api_key"),
+        description="Massive API key for company name lookups (optional)",
     )
 
     hvcwatch_db_path: str | None = Field(
