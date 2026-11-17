@@ -1,15 +1,16 @@
 import pytest
+import requests
 from unittest.mock import Mock, patch
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import pandas as pd
 
+from hvcwatch import utils
 from hvcwatch.utils import (
     extract_tickers,
     extract_timeframe,
     get_company_name,
     is_market_hours_or_near,
-    _load_sec_ticker_lookup,
     _get_nyse_calendar,
 )
 
@@ -233,72 +234,117 @@ class TestIsMarketHoursOrNear:
         assert isinstance(result, bool)
 
 
+OK_BODY = b'{"status":"OK","results":{"name":"Apple Inc.","ticker":"AAPL"}}'
+MASSIVE_AAPL_URL = "https://api.massive.com/v3/reference/tickers/AAPL"
+
+
+def make_response(status_code: int, body: bytes = b"") -> requests.Response:
+    """🧪 Build a real requests.Response so status and JSON handling match production."""
+    response = requests.Response()
+    response.status_code = status_code
+    response._content = body
+    return response
+
+
 class TestGetCompanyName:
-    """Test cases for get_company_name function."""
+    """Test cases for get_company_name using the live Massive API."""
 
     @pytest.fixture(autouse=True)
     def clear_cache(self):
-        """Clear the LRU cache before each test."""
-        _load_sec_ticker_lookup.cache_clear()
+        """🧹 Clear the per-ticker cache before and after each test."""
+        utils._lookup_company_name.cache_clear()
         yield
-        _load_sec_ticker_lookup.cache_clear()
+        utils._lookup_company_name.cache_clear()
 
-    def test_get_company_name_found(self, tmp_path):
-        """Test getting company name for known ticker."""
-        # Create mock SEC data file
-        sec_data = {
-            "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
-            "1": {"cik_str": 789019, "ticker": "MSFT", "title": "MICROSOFT CORP"},
-        }
-        data_file = tmp_path / "company_tickers.json"
-        import json
+    @pytest.fixture
+    def api_key(self):
+        """🔑 Configure a fake Massive API key."""
+        with patch("hvcwatch.utils.settings", Mock(massive_api_key="test-key")):
+            yield
 
-        data_file.write_text(json.dumps(sec_data))
+    def test_returns_name_from_massive(self, api_key):
+        """✅ A 200 response returns results.name."""
+        # Arrange
+        response = make_response(200, OK_BODY)
 
-        with patch("hvcwatch.utils.SEC_DATA_PATH", data_file):
+        # Act / Assert
+        with patch("hvcwatch.utils.requests.get", return_value=response):
             assert get_company_name("AAPL") == "Apple Inc."
-            assert get_company_name("MSFT") == "MICROSOFT CORP"
 
-    def test_get_company_name_not_found(self, tmp_path):
-        """Test getting company name for unknown ticker."""
-        sec_data = {
-            "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
-        }
-        data_file = tmp_path / "company_tickers.json"
-        import json
+    def test_ticker_is_uppercased_and_bearer_header_sent(self, api_key):
+        """✅ The URL uses an uppercase ticker and the key goes in the header, not the URL."""
+        # Act
+        with patch(
+            "hvcwatch.utils.requests.get", return_value=make_response(200, OK_BODY)
+        ) as get:
+            get_company_name("aapl")
 
-        data_file.write_text(json.dumps(sec_data))
+        # Assert
+        get.assert_called_once()
+        call = get.call_args
+        url = call.args[0] if call.args else call.kwargs["url"]
+        assert url == MASSIVE_AAPL_URL
+        assert call.kwargs["headers"] == {"Authorization": "Bearer test-key"}
+        assert call.kwargs["timeout"] == 10
 
-        with patch("hvcwatch.utils.SEC_DATA_PATH", data_file):
-            assert get_company_name("FAKE") is None
-            assert get_company_name("NOTREAL") is None
+    def test_unknown_ticker_404_returns_none(self, api_key):
+        """✅ A 404 means the ticker is unknown, so the result is None."""
+        with patch("hvcwatch.utils.requests.get", return_value=make_response(404)):
+            assert get_company_name("ZZZZ") is None
 
-    def test_get_company_name_case_insensitive(self, tmp_path):
-        """Test that ticker lookup is case insensitive."""
-        sec_data = {
-            "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
-        }
-        data_file = tmp_path / "company_tickers.json"
-        import json
+    @pytest.mark.parametrize("status_code", [500, 429])
+    def test_transient_error_returns_none_and_is_not_cached(self, api_key, status_code):
+        """✅ A 5xx or 429 returns None, and the next call retries the API."""
+        # Arrange: first call fails, second call succeeds
+        responses = [
+            make_response(status_code, OK_BODY),
+            make_response(200, OK_BODY),
+        ]
 
-        data_file.write_text(json.dumps(sec_data))
+        # Act / Assert
+        with patch("hvcwatch.utils.requests.get", side_effect=responses) as get:
+            assert get_company_name("AAPL") is None
+            assert get_company_name("AAPL") == "Apple Inc."
+        assert get.call_count == 2
 
-        with patch("hvcwatch.utils.SEC_DATA_PATH", data_file):
+    @pytest.mark.parametrize(
+        "error",
+        [requests.Timeout("timed out"), requests.ConnectionError("no route")],
+    )
+    def test_network_errors_return_none(self, api_key, error):
+        """✅ Timeouts and connection errors never raise to the caller."""
+        with patch("hvcwatch.utils.requests.get", side_effect=error):
+            assert get_company_name("AAPL") is None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b"not json",
+            b'{"status":"OK","results":{"ticker":"AAPL"}}',
+        ],
+        ids=["bad-json", "missing-name"],
+    )
+    def test_malformed_payload_returns_none(self, api_key, body):
+        """✅ Bad JSON or a missing results.name returns None."""
+        with patch(
+            "hvcwatch.utils.requests.get", return_value=make_response(200, body)
+        ):
+            assert get_company_name("AAPL") is None
+
+    def test_missing_api_key_skips_http_call(self):
+        """✅ Without a key, no HTTP call is made and the result is None."""
+        with (
+            patch("hvcwatch.utils.settings", Mock(massive_api_key=None)),
+            patch("hvcwatch.utils.requests.get") as get,
+        ):
+            assert get_company_name("AAPL") is None
+        get.assert_not_called()
+
+    def test_successful_lookup_is_cached(self, api_key):
+        """✅ A successful lookup costs one HTTP call, even for a different case."""
+        with patch(
+            "hvcwatch.utils.requests.get", return_value=make_response(200, OK_BODY)
+        ) as get:
+            assert get_company_name("AAPL") == "Apple Inc."
             assert get_company_name("aapl") == "Apple Inc."
-            assert get_company_name("Aapl") == "Apple Inc."
-            assert get_company_name("AAPL") == "Apple Inc."
-
-    def test_get_company_name_missing_file(self, tmp_path):
-        """Test graceful handling when SEC data file is missing."""
-        missing_file = tmp_path / "nonexistent.json"
-
-        with patch("hvcwatch.utils.SEC_DATA_PATH", missing_file):
-            assert get_company_name("AAPL") is None
-
-    def test_get_company_name_invalid_json(self, tmp_path):
-        """Test graceful handling when SEC data file has invalid JSON."""
-        data_file = tmp_path / "company_tickers.json"
-        data_file.write_text("not valid json")
-
-        with patch("hvcwatch.utils.SEC_DATA_PATH", data_file):
-            assert get_company_name("AAPL") is None
+        assert get.call_count == 1

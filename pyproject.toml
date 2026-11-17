@@ -14,11 +14,11 @@ dependencies = [
     "imap-tools>=1.16.0",
     "pytest-env>=1.8.5",
     "sentry-sdk>=2.75.0",
+    "requests>=2.34.2",
 ]
 
 [project.scripts]
 hvcwatch = "hvcwatch.main:main"
-get-ticker-data = "hvcwatch.get_ticker_data:main"
 
 [build-system]
 requires = ["uv_build>=0.9.0,<1.0.0"]

@@ -1,46 +1,58 @@
-import json
 import re
 from datetime import date, datetime, timedelta
 from functools import cache
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
+import requests
 
+from hvcwatch.config import settings
 from hvcwatch.logging import logger
 from hvcwatch.types import Timeframe
 
-# Path to SEC company tickers data file
-SEC_DATA_PATH = Path(__file__).parent.parent.parent / "data" / "company_tickers.json"
+MASSIVE_TICKER_URL = "https://api.massive.com/v3/reference/tickers/{ticker}"
+MASSIVE_TIMEOUT_SECONDS = 10
 
 
 @cache
-def _load_sec_ticker_lookup() -> dict[str, str]:
+def _lookup_company_name(ticker: str) -> str | None:
     """
-    Load SEC company tickers data and build ticker->name lookup.
+    Fetch a company name from the Massive ticker overview endpoint.
 
-    Returns a dict mapping ticker symbols to company names.
-    Uses LRU cache to avoid reloading the file on every lookup.
+    Results are cached per ticker, so each symbol costs one HTTP call per
+    process. A 404 (unknown ticker) is cached as None. Any other failure
+    raises, so transient errors are never cached and the next call retries.
+
+    Args:
+        ticker: Uppercase ticker symbol (e.g., "AAPL")
+
+    Returns:
+        Company name, or None if Massive does not know the ticker
+
+    Raises:
+        requests.RequestException: Network error, timeout, or non-2xx status
+        KeyError: Response JSON is missing results.name
+        ValueError: Response body is not valid JSON
     """
-    if not SEC_DATA_PATH.exists():
-        logger.warning("SEC data file not found path={path}", path=SEC_DATA_PATH)
-        return {}
-
-    try:
-        with open(SEC_DATA_PATH) as f:
-            data = json.load(f)
-        # Build ticker -> title lookup
-        lookup = {entry["ticker"]: entry["title"] for entry in data.values()}
-        logger.info("Loaded SEC ticker data entries={count}", count=len(lookup))
-        return lookup
-    except (json.JSONDecodeError, KeyError) as e:
-        logger.error("Failed to parse SEC data error={error}", error=str(e))
-        return {}
+    # 🔐 The key goes in the header, never the URL, so it stays out of logs
+    response = requests.get(
+        MASSIVE_TICKER_URL.format(ticker=ticker),
+        headers={"Authorization": f"Bearer {settings.massive_api_key}"},
+        timeout=MASSIVE_TIMEOUT_SECONDS,
+    )
+    if response.status_code == 404:
+        logger.info("Ticker not found on Massive ticker={ticker}", ticker=ticker)
+        return None
+    response.raise_for_status()
+    return response.json()["results"]["name"]
 
 
 def get_company_name(ticker: str) -> str | None:
     """
-    Look up company name for a ticker symbol using SEC data.
+    Look up company name for a ticker symbol using the Massive API.
+
+    Never raises. Company names are optional in notifications, so any
+    failure is logged and returns None.
 
     Args:
         ticker: Stock ticker symbol (e.g., "AAPL")
@@ -48,8 +60,19 @@ def get_company_name(ticker: str) -> str | None:
     Returns:
         Company name if found (e.g., "Apple Inc."), None otherwise
     """
-    lookup = _load_sec_ticker_lookup()
-    return lookup.get(ticker.upper())
+    if not settings.massive_api_key:
+        logger.warning("Massive API key not set, skipping company name lookup")
+        return None
+
+    try:
+        return _lookup_company_name(ticker.upper())
+    except Exception as e:  # 🛡️ Broad catch: a notification must still be sent
+        logger.warning(
+            "Company name lookup failed ticker={ticker} error={error}",
+            ticker=ticker,
+            error=str(e),
+        )
+        return None
 
 
 def extract_tickers(subject: str) -> list[str]:
