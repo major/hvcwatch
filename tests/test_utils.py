@@ -189,9 +189,11 @@ class TestIsMarketHoursOrNear:
         result = is_market_hours_or_near(test_time, hours=3)
         assert result is False
 
-    def test_market_holiday(self, mock_calendar_closed):
+    def test_market_holiday(self, mock_calendar_closed, nyc_timezone):
         """Test when market is closed for holiday."""
-        result = is_market_hours_or_near()
+        test_time = datetime(2024, 12, 25, 12, 0, tzinfo=nyc_timezone)
+
+        result = is_market_hours_or_near(test_time)
         assert result is False
 
     def test_naive_datetime_input(self, mock_calendar_open):
@@ -216,10 +218,25 @@ class TestIsMarketHoursOrNear:
         result = is_market_hours_or_near(test_time)
         assert isinstance(result, bool)
 
-    def test_default_datetime_is_now(self, mock_calendar_open):
-        """Test that default datetime uses current time."""
-        result = is_market_hours_or_near()
-        assert isinstance(result, bool)
+    def test_check_time_is_required(self):
+        """check_time has no default, so there is no stale import-time clock read."""
+        with pytest.raises(TypeError):
+            is_market_hours_or_near()  # ty: ignore[missing-argument]
+
+    @pytest.mark.parametrize(
+        "out_of_range",
+        [
+            datetime(1900, 1, 1),  # 📭 imap_tools value for a missing or bad Date
+            datetime(2100, 1, 1),  # 🔮 past the last session of the calendar
+        ],
+    )
+    def test_out_of_range_date_warns_and_returns_false(self, out_of_range, caplog):
+        """Dates outside the XNYS calendar log a warning and return False."""
+        with caplog.at_level("WARNING", logger="hvcwatch.utils"):
+            result = is_market_hours_or_near(out_of_range)
+
+        assert result is False
+        assert "outside the NYSE calendar range" in caplog.text
 
     @pytest.mark.parametrize("hours", [0, 1, 3, 6])
     def test_different_hour_buffers(self, mock_calendar_open, nyc_timezone, hours):
