@@ -10,6 +10,6 @@ typecheck:
 	uv run ty check src
 
 complexity:
-	uv run radon cc src/ -s -n C --no-assert
+	uv run ruff check --select C901 src/
 
 all: lint test typecheck complexity
