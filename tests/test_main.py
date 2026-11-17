@@ -13,7 +13,7 @@ pytestmark = pytest.mark.usefixtures("hvcwatch_logger")
 def mailbox(override_settings, fake_mailbox):
     """📭 A fake mailbox on a non-default host and folder. Its script ends at the first poll."""
     override_settings(imap_host="imap.example.com", imap_folder="Alerts")
-    return fake_mailbox(fetches=[[]])
+    return fake_mailbox()
 
 
 def test_main_connects_with_the_configured_host_login_and_folder(settings, mailbox):
@@ -24,11 +24,8 @@ def test_main_connects_with_the_configured_host_login_and_folder(settings, mailb
 
     # Assert
     assert mailbox.host == "imap.example.com"
-    assert mailbox.login_args == (
-        settings.fastmail_user,
-        settings.fastmail_pass,
-        "Alerts",
-    )
+    assert mailbox.login_args == (settings.fastmail_user, settings.fastmail_pass, None)
+    assert mailbox.folder.selected == ("Alerts", True)  # 🔒 Opened read-only
 
 
 def test_main_configures_logging_before_it_logs(mailbox, hvcwatch_logger, capsys):

@@ -12,7 +12,9 @@ import pytest
 
 from hvcwatch.db import (
     _get_week_monday,
+    get_cursor,
     record_alert,
+    save_cursor,
     should_alert,
 )
 
@@ -206,6 +208,27 @@ class TestRecordAlert:
         record_alert("AAPL", "weekly", MONDAY)
 
         assert count_rows(db_path) == 1
+
+
+class TestMailboxCursor:
+    """The per-folder IMAP position that tracks seen mail without writing flags."""
+
+    def test_cursor_is_stored_per_folder_and_a_save_overwrites_only_its_folder(self):
+        """📌 An unset folder has no cursor, a save round-trips, and a second save replaces only its own row."""
+        # Arrange
+        save_cursor("Alerts", 7, 41)
+        save_cursor("INBOX", 3, 5)
+
+        # Act / Assert
+        assert get_cursor("Alerts") == (7, 41)
+
+        # Act
+        save_cursor("Alerts", 8, 1)  # 🔁 A new UIDVALIDITY overwrites the old row
+
+        # Assert
+        assert get_cursor("Alerts") == (8, 1)
+        assert get_cursor("INBOX") == (3, 5)
+        assert get_cursor("Archive") is None
 
 
 class TestDatabasePath:

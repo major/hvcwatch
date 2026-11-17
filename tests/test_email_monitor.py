@@ -18,10 +18,10 @@ import pytest
 import responses
 from imap_tools.message import MailMessage
 
-from hvcwatch.db import record_alert
+from hvcwatch.db import get_cursor, record_alert, save_cursor
 from hvcwatch.email_monitor import (
     connect_imap,
-    get_unread_messages,
+    fetch_new_messages,
     is_timeframe_enabled,
     monitor_mailbox,
     process_email_message,
@@ -46,14 +46,22 @@ MONTHLY_SUBJECT = "Alert: New symbols: AAPL were added to HVC Monthly"
 # 📨 What IDLE returns when the server reports a new message
 NEW_MAIL = [b"* 1 EXISTS"]
 
+# 📁 The folder name and UIDVALIDITY that the fake mailbox and saved cursors use
+FOLDER = "Alerts"
+UIDVALIDITY = 1  # 🆔 Matches the fake mailbox default
 
-def make_email(subject: str | None, date_header: str = MONDAY) -> MailMessage:
-    """📨 Build a real imap_tools message. A None subject leaves the header out."""
+
+def make_email(
+    subject: str | None, date_header: str = MONDAY, uid: int = 1
+) -> MailMessage:
+    """📨 Build a real imap_tools message with a UID. A None subject leaves the header out."""
     headers = [f"Date: {date_header}"]
     if subject is not None:
         headers.insert(0, f"Subject: {subject}")
     raw = "\r\n".join(headers) + "\r\n\r\nbody"
-    return MailMessage.from_bytes(raw.encode())
+    # 🧾 The UID comes from the FETCH response, as imap_tools reads it from the server
+    fetch_item = (f"1 (UID {uid} FLAGS ())".encode(), raw.encode())
+    return MailMessage([fetch_item])
 
 
 def read_alert_rows(db_path: Path) -> list[tuple[str, str, str]]:
@@ -74,65 +82,183 @@ def posted_titles(
     return [only_embed(payload)["title"] for payload in posts_to(http_mock, url)]
 
 
-class TestGetUnreadMessages:
-    """Unread mail is fetched once, marked seen, and each message goes through the pipeline."""
+class TestFetchNewMessages:
+    """Mail after the saved UID cursor is processed once, read-only, and the cursor follows it."""
 
-    def test_only_the_market_hours_alert_is_sent_and_recorded(
+    def test_first_run_baselines_at_uidnext_minus_one_and_sends_nothing(
         self, http_mock, fake_discord, fake_mailbox, db_path
     ):
-        """📬 Of two unread mails, the weekday weekly alert is sent and the Saturday one is not."""
+        """🌱 With no saved cursor, old mail is skipped: the cursor goes to UIDNEXT - 1 and no body is fetched."""
         # Arrange
         fake_discord()
+        mailbox = fake_mailbox(uidvalidity=UIDVALIDITY, uidnext=42)
+
+        # Act
+        fetch_new_messages(mailbox, FOLDER)
+
+        # Assert
+        assert get_cursor(FOLDER) == (UIDVALIDITY, 41)
+        assert posted_titles(http_mock) == []
+        assert read_alert_rows(db_path) == []
+        assert mailbox.fetch_calls == []
+
+    def test_uidvalidity_change_resets_cursor_and_warns(
+        self, http_mock, fake_discord, fake_mailbox, caplog
+    ):
+        """♻️ A new UIDVALIDITY makes the old UIDs meaningless: the cursor restarts with a warning."""
+        # Arrange
+        fake_discord()
+        save_cursor(FOLDER, 7, 30)
+        mailbox = fake_mailbox(uidvalidity=8, uidnext=5)
+
+        # Act
+        with caplog.at_level(logging.WARNING, logger="hvcwatch.email_monitor"):
+            fetch_new_messages(mailbox, FOLDER)
+
+        # Assert
+        assert get_cursor(FOLDER) == (8, 4)
+        assert posted_titles(http_mock) == []
+        assert mailbox.fetch_calls == []
+        assert "UIDVALIDITY changed" in caplog.text
+        assert "old=7" in caplog.text
+        assert "new=8" in caplog.text
+
+    def test_new_mail_after_cursor_is_processed_in_order_and_cursor_advances(
+        self, http_mock, fake_discord, fake_mailbox, db_path
+    ):
+        """📬 Mail after the cursor goes through the pipeline in UID order, fetched without setting \\Seen."""
+        # Arrange
+        fake_discord()
+        save_cursor(FOLDER, UIDVALIDITY, 10)
         mailbox = fake_mailbox(
             fetches=[
-                [make_email(WEEKLY_SUBJECT), make_email(MSFT_WEEKLY_SUBJECT, SATURDAY)]
-            ]
+                [
+                    make_email(WEEKLY_SUBJECT, uid=11),
+                    make_email(MSFT_WEEKLY_SUBJECT, uid=12),
+                ]
+            ],
+            uidvalidity=UIDVALIDITY,
+            uidnext=13,
         )
 
         # Act
-        get_unread_messages(mailbox)
+        fetch_new_messages(mailbox, FOLDER)
 
         # Assert
-        assert posted_titles(http_mock) == ["AAPL"]
-        assert read_alert_rows(db_path) == [("AAPL", "weekly", "2024-12-02")]
-        assert mailbox.fetch_calls == [("(UNSEEN)", True)]
+        assert posted_titles(http_mock) == ["AAPL", "MSFT"]
+        assert read_alert_rows(db_path) == [
+            ("AAPL", "weekly", "2024-12-02"),
+            ("MSFT", "weekly", "2024-12-02"),
+        ]
+        assert mailbox.fetch_calls == [
+            ("(UID 11:*)", False)
+        ]  # 🔒 Read-only: BODY.PEEK, no \Seen
+        assert get_cursor(FOLDER) == (UIDVALIDITY, 12)
 
-    def test_no_unread_mail_sends_nothing(
-        self, http_mock, fake_discord, fake_mailbox, db_path
+    @pytest.mark.parametrize(
+        "stale_uid",
+        [pytest.param(10, id="same-uid"), pytest.param(3, id="older-uid")],
+    )
+    def test_message_at_or_below_cursor_is_skipped(
+        self, stale_uid, http_mock, fake_discord, fake_mailbox, db_path
     ):
-        """📭 An empty inbox sends nothing, records nothing, and still runs one fetch."""
+        """🪤 IMAP's N:* returns the newest mail even when it is older than N, so such mail is skipped."""
         # Arrange
         fake_discord()
-        mailbox = fake_mailbox(fetches=[[]])
+        save_cursor(FOLDER, UIDVALIDITY, 10)
+        mailbox = fake_mailbox(
+            fetches=[[make_email(WEEKLY_SUBJECT, uid=stale_uid)]],
+            uidvalidity=UIDVALIDITY,
+            uidnext=11,
+        )
 
         # Act
-        get_unread_messages(mailbox)
+        fetch_new_messages(mailbox, FOLDER)
 
         # Assert
         assert posted_titles(http_mock) == []
         assert read_alert_rows(db_path) == []
-        assert mailbox.fetch_calls == [("(UNSEEN)", True)]
+        assert get_cursor(FOLDER) == (UIDVALIDITY, 10)
+
+    def test_no_new_mail_leaves_cursor_unchanged(self, fake_mailbox):
+        """📭 An empty result after the cursor keeps the saved position."""
+        # Arrange
+        save_cursor(FOLDER, UIDVALIDITY, 10)
+        mailbox = fake_mailbox(fetches=[[]], uidvalidity=UIDVALIDITY, uidnext=11)
+
+        # Act
+        fetch_new_messages(mailbox, FOLDER)
+
+        # Assert
+        assert mailbox.fetch_calls == [("(UID 11:*)", False)]
+        assert get_cursor(FOLDER) == (UIDVALIDITY, 10)
+
+    def test_failed_message_keeps_cursor_on_last_good_one_and_propagates(
+        self, monkeypatch, http_mock, fake_discord, fake_mailbox, db_path
+    ):
+        """🛑 If processing raises, the cursor stops before that message and later mail waits for the next run."""
+        # Arrange
+        fake_discord()
+        save_cursor(FOLDER, UIDVALIDITY, 10)
+        attempted: list[str | None] = []
+
+        def fail_on_second(msg: MailMessage) -> None:
+            """💥 Real processing for the first message, an error for the second."""
+            attempted.append(msg.uid)
+            if msg.uid == "12":
+                raise RuntimeError("delivery pipeline broke")
+            process_email_message(msg)
+
+        monkeypatch.setattr(
+            "hvcwatch.email_monitor.process_email_message", fail_on_second
+        )
+        mailbox = fake_mailbox(
+            fetches=[
+                [
+                    make_email(WEEKLY_SUBJECT, uid=11),
+                    make_email(MSFT_WEEKLY_SUBJECT, uid=12),
+                    make_email(WEEKLY_THREE_SUBJECT, uid=13),
+                ]
+            ],
+            uidvalidity=UIDVALIDITY,
+            uidnext=14,
+        )
+
+        # Act
+        with pytest.raises(RuntimeError, match="delivery pipeline broke"):
+            fetch_new_messages(mailbox, FOLDER)
+
+        # Assert
+        assert attempted == ["11", "12"]  # ⏭️ The third message is never reached
+        assert posted_titles(http_mock) == ["AAPL"]
+        assert get_cursor(FOLDER) == (UIDVALIDITY, 11)
 
 
 class TestMonitorMailbox:
-    """The IDLE loop: a poll that reports new mail fetches and processes unseen mail."""
+    """The IDLE loop: a poll that reports new mail fetches and processes mail after the cursor."""
 
     def test_new_mail_during_idle_is_fetched_and_processed(
         self, http_mock, fake_discord, fake_mailbox, db_path
     ):
-        """📨 A new-mail poll fetches the unseen weekly alert, then the loop polls again."""
+        """📨 A new-mail poll fetches the weekly alert after the cursor, then the loop polls again."""
         # Arrange
         fake_discord()
-        mailbox = fake_mailbox(fetches=[[make_email(WEEKLY_SUBJECT)]], polls=[NEW_MAIL])
+        save_cursor(FOLDER, UIDVALIDITY, 10)
+        mailbox = fake_mailbox(
+            fetches=[[make_email(WEEKLY_SUBJECT, uid=11)]],
+            polls=[NEW_MAIL],
+            uidvalidity=UIDVALIDITY,
+            uidnext=12,
+        )
 
         # Act: the script ends on the second poll
         with pytest.raises(ScriptExhausted):
-            monitor_mailbox(mailbox)
+            monitor_mailbox(mailbox, FOLDER)
 
         # Assert
         assert posted_titles(http_mock) == ["AAPL"]
         assert read_alert_rows(db_path) == [("AAPL", "weekly", "2024-12-02")]
-        assert mailbox.fetch_calls == [("(UNSEEN)", True)]
+        assert mailbox.fetch_calls == [("(UID 11:*)", False)]
         assert mailbox.idle.timeouts == [10, 10]
 
     def test_idle_timeout_without_new_mail_fetches_nothing(
@@ -145,7 +271,7 @@ class TestMonitorMailbox:
 
         # Act: the script ends on the second poll
         with pytest.raises(ScriptExhausted):
-            monitor_mailbox(mailbox)
+            monitor_mailbox(mailbox, FOLDER)
 
         # Assert
         assert posted_titles(http_mock) == []
@@ -155,32 +281,39 @@ class TestMonitorMailbox:
 
 
 class TestConnectImap:
-    """connect_imap logs in, handles unread mail, then monitors IDLE until the script ends."""
+    """connect_imap opens the folder read-only, resumes the backlog, then monitors IDLE."""
 
-    def test_logs_in_handles_unread_then_idle_mail_and_logs_out(
+    def test_opens_read_only_resumes_backlog_then_idle_mail_and_logs_out(
         self, http_mock, fake_discord, fake_mailbox, db_path
     ):
-        """🔌 Unread AAPL is sent first, then MSFT from the IDLE poll, and the session closes."""
+        """🔌 Login skips the default SELECT, EXAMINEs the folder, sends backlog AAPL, then IDLE MSFT, then logs out."""
         # Arrange
         fake_discord()
+        save_cursor(FOLDER, UIDVALIDITY, 10)
         mailbox = fake_mailbox(
-            fetches=[[make_email(WEEKLY_SUBJECT)], [make_email(MSFT_WEEKLY_SUBJECT)]],
+            fetches=[
+                [make_email(WEEKLY_SUBJECT, uid=11)],
+                [make_email(MSFT_WEEKLY_SUBJECT, uid=12)],
+            ],
             polls=[NEW_MAIL],
+            uidvalidity=UIDVALIDITY,
+            uidnext=13,
         )
 
         # Act: the script ends on the second IDLE poll
         with pytest.raises(ScriptExhausted):
-            connect_imap("imap.example.com", "user", "pass", "Alerts")
+            connect_imap("imap.example.com", "user", "pass", FOLDER)
 
         # Assert
         assert mailbox.host == "imap.example.com"
-        assert mailbox.login_args == ("user", "pass", "Alerts")
+        assert mailbox.login_args == ("user", "pass", None)  # 🔌 No default SELECT
+        assert mailbox.folder.selected == (FOLDER, True)  # 🔒 EXAMINE, never SELECT
         assert posted_titles(http_mock) == ["AAPL", "MSFT"]
         assert read_alert_rows(db_path) == [
             ("AAPL", "weekly", "2024-12-02"),
             ("MSFT", "weekly", "2024-12-02"),
         ]
-        assert mailbox.fetch_calls == [("(UNSEEN)", True), ("(UNSEEN)", True)]
+        assert mailbox.fetch_calls == [("(UID 11:*)", False), ("(UID 12:*)", False)]
         assert mailbox.logged_out
 
 
