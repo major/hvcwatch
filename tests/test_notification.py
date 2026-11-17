@@ -20,7 +20,6 @@ from hvcwatch.notification import (
 )
 from tests.helpers import SECOND_URL, WEBHOOK_URL, only_embed, posts_to
 
-EMBED_COLOR = 0x03B2F8  # discord_webhook converts the "03b2f8" hex string to an int
 FOOTER = "HVC Watch · Major's Bots"
 
 
@@ -28,42 +27,52 @@ class TestDiscordNotifierSend:
     """DiscordNotifier.send: the embed Discord receives."""
 
     @pytest.mark.parametrize(
-        ("ticker", "timeframe", "overview", "description"),
+        ("ticker", "timeframe", "overview", "title", "description", "color"),
         [
             pytest.param(
                 "AAPL",
                 "daily",
                 ("Apple Inc.", "CS"),
-                "**Apple Inc.**\n**Type:** CS\n**Timeframe:** Daily",
+                "Apple Inc.",
+                "**AAPL** · CS · Daily",
+                0x03B2F8,  # 🔵 discord_webhook converts "03b2f8" to an int
                 id="daily-with-name-and-type",
             ),
             pytest.param(
                 "TSLA",
                 "weekly",
                 ("Tesla, Inc.", "CS"),
-                "**Tesla, Inc.**\n**Type:** CS\n**Timeframe:** Weekly",
+                "Tesla, Inc.",
+                "**TSLA** · CS · Weekly",
+                0x9B59B6,  # 🟣
                 id="weekly",
             ),
             pytest.param(
                 "NVDA",
                 "monthly",
                 ("NVIDIA CORP", "CS"),
-                "**NVIDIA CORP**\n**Type:** CS\n**Timeframe:** Monthly 🔥",
+                "NVIDIA CORP",
+                "**NVDA** · CS · Monthly 🔥",
+                0xF39C12,  # 🟠
                 id="monthly-has-fire-emoji",
             ),
             pytest.param(
                 "SPY",
                 "daily",
                 ("SPDR S&P 500 ETF Trust", None),
-                "**SPDR S&P 500 ETF Trust**\n**Timeframe:** Daily",
-                id="type-missing-drops-type-line",
+                "SPDR S&P 500 ETF Trust",
+                "**SPY** · Daily",
+                0x03B2F8,
+                id="type-missing-drops-type-part",
             ),
             pytest.param(
                 "ZZZZ",
                 "daily",
                 (None, None),
-                "**Timeframe:** Daily",
-                id="company-name-none-drops-name-line",
+                "ZZZZ",  # 🏷️ No name, so the title falls back to the ticker
+                "Daily",  # 🧹 No bold ticker either, the title already shows it
+                0x03B2F8,
+                id="no-name-title-is-ticker",
             ),
         ],
     )
@@ -72,11 +81,12 @@ class TestDiscordNotifierSend:
         http_mock,
         fake_discord,
         massive,
-        settings,
         ticker,
         timeframe,
         overview,
+        title,
         description,
+        color,
     ):
         """✅ One POST whose embed carries every field a user sees."""
         # Arrange
@@ -95,32 +105,17 @@ class TestDiscordNotifierSend:
             "description": embed["description"],
             "color": embed["color"],
             "footer": embed["footer"]["text"],
-            "image": embed["image"]["url"],
+            "image": embed.get("image"),  # 🧼 No image: the blank gap is gone
             "thumbnail": embed["thumbnail"]["url"],
         } == {
-            "title": ticker,
+            "title": title,
             "description": description,
-            "color": EMBED_COLOR,
+            "color": color,
             "footer": FOOTER,
-            "image": settings.transparent_png,
+            "image": None,
             "thumbnail": f"https://static.stocktitan.net/company-logo/{ticker.lower()}.webp",
         }
         assert datetime.fromisoformat(embed["timestamp"])
-
-    def test_send_uses_custom_transparent_png(
-        self, http_mock, fake_discord, override_settings
-    ):
-        """🖼️ The embed image comes from settings, not a hardcoded URL."""
-        # Arrange
-        fake_discord()
-        override_settings(transparent_png="https://example.com/clear.png")
-
-        # Act
-        DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
-
-        # Assert
-        (payload,) = posts_to(http_mock, WEBHOOK_URL)
-        assert only_embed(payload)["image"]["url"] == "https://example.com/clear.png"
 
     def test_204_empty_body_is_success(self, http_mock, fake_discord):
         """✅ Discord's 204 (no body) is a successful delivery, not an error."""
@@ -236,19 +231,19 @@ class TestNotifyAllPlatforms:
     """notify_all_platforms: the real notifier, one POST per configured URL."""
 
     @pytest.mark.parametrize(
-        ("timeframe", "expected_line"),
+        ("timeframe", "expected_description"),
         [
-            ("daily", "**Timeframe:** Daily"),
-            ("weekly", "**Timeframe:** Weekly"),
-            ("monthly", "**Timeframe:** Monthly 🔥"),
-            (None, "**Timeframe:** Daily"),  # 🗓️ No argument means daily
+            ("daily", "**AAPL** · CS · Daily"),
+            ("weekly", "**AAPL** · CS · Weekly"),
+            ("monthly", "**AAPL** · CS · Monthly 🔥"),
+            (None, "**AAPL** · CS · Daily"),  # 🗓️ No argument means daily
         ],
         ids=["daily", "weekly", "monthly", "default-is-daily"],
     )
     def test_posts_once_with_timeframe(
-        self, http_mock, fake_discord, massive, timeframe, expected_line
+        self, http_mock, fake_discord, massive, timeframe, expected_description
     ):
-        """✅ One POST to the configured URL, with the right timeframe and name."""
+        """✅ One POST to the configured URL, titled with the company name."""
         # Arrange
         fake_discord()
         massive("AAPL", "Apple Inc.", "CS")
@@ -260,8 +255,8 @@ class TestNotifyAllPlatforms:
         # Assert
         (payload,) = posts_to(http_mock, WEBHOOK_URL)
         embed = only_embed(payload)
-        assert embed["title"] == "AAPL"
-        assert embed["description"] == f"**Apple Inc.**\n**Type:** CS\n{expected_line}"
+        assert embed["title"] == "Apple Inc."
+        assert embed["description"] == expected_description
 
     def test_posts_once_to_each_configured_url(
         self, http_mock, fake_discord, override_settings
@@ -281,7 +276,7 @@ class TestNotifyAllPlatforms:
         assert (
             len(first) == len(second) == 1
         )  # 🧹 The duplicate URL is not posted twice
-        assert only_embed(first[0])["description"].endswith("**Timeframe:** Weekly")
+        assert only_embed(first[0])["description"] == "Weekly"  # 📭 No name lookup here
         assert only_embed(first[0])["title"] == only_embed(second[0])["title"] == "AAPL"
 
     def test_connection_error_is_logged_and_next_url_still_posts(

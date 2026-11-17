@@ -20,6 +20,13 @@ MAX_WAIT_SECONDS = 30.0
 JITTER_FRACTION = 0.1
 DISCORD_TIMEOUT_SECONDS = 10
 
+# 🎨 Embed color per timeframe, as hex strings for discord_webhook
+TIMEFRAME_COLORS = {
+    "daily": "03b2f8",  # 🔵
+    "weekly": "9b59b6",  # 🟣
+    "monthly": "f39c12",  # 🟠
+}
+
 
 class DiscordDeliveryError(Exception):
     """❌ Discord did not accept a webhook message, even after retries."""
@@ -138,23 +145,23 @@ class DiscordNotifier:
 
         # Add 🔥 emoji for monthly alerts
         emoji = " 🔥" if timeframe == "monthly" else ""
+        # 🧩 The title already shows the ticker when there is no name, so bold it only with a name
         description_parts = []
         if company_name:
-            description_parts.append(f"**{company_name}**")
+            description_parts.append(f"**{ticker}**")
         if ticker_type:
-            description_parts.append(f"**Type:** {ticker_type}")
-        description_parts.append(f"**Timeframe:** {timeframe.capitalize()}{emoji}")
-        description = "\n".join(description_parts)
+            description_parts.append(ticker_type)
+        description_parts.append(f"{timeframe.capitalize()}{emoji}")
+        description = " · ".join(description_parts)
 
         embed = DiscordEmbed(
-            title=ticker,
+            title=company_name or ticker,
             description=description,
-            color="03b2f8",
+            color=TIMEFRAME_COLORS[timeframe],
         )
         logo_url = f"https://static.stocktitan.net/company-logo/{ticker.lower()}.webp"
         embed.set_thumbnail(url=logo_url)
         embed.set_footer(text="HVC Watch · Major's Bots")
-        embed.set_image(url=config.get_settings().transparent_png)
         embed.set_timestamp()
         webhook.add_embed(embed)
         self._deliver(webhook)
