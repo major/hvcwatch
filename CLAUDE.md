@@ -149,7 +149,7 @@ uv run hvcwatch  # Entry point defined in pyproject.toml
 ## Dependencies & Tooling
 
 - **uv**: Package/project manager (replaces pip/venv)
-- **Python**: 3.13 (specified in `.python-version`)
+- **Python**: 3.15 (specified in `.python-version`)
 - **Key libraries**: pydantic-settings, loguru, imap-tools, polygon-api-client, discord-webhook, polars
 - **Dev tools**: pyright, pytest, ruff
 
