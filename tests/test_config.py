@@ -95,6 +95,26 @@ class TestSettingsValidation:
         with pytest.raises(ValueError, match="Discord webhook URL"):
             Settings(fastmail_user="test@example.com", fastmail_pass="password123")
 
+    @pytest.mark.parametrize(
+        ("single_url", "urls"),
+        [
+            ("   ", None),
+            (None, ","),
+            (None, " , "),
+            ("  ", ","),
+        ],
+    )
+    def test_whitespace_only_discord_urls_raises_value_error(self, single_url, urls):
+        """🫥 Values that are only whitespace or separators count as no URL."""
+        # Act / Assert
+        with pytest.raises(ValueError, match="Discord webhook URL"):
+            Settings(
+                fastmail_user="test@example.com",
+                fastmail_pass="password123",
+                discord_webhook_url=single_url,
+                discord_webhook_urls=urls,
+            )
+
 
 class TestSettingsFromEnv:
     """Test loading Settings from environment variables."""
