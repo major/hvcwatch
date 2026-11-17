@@ -126,12 +126,14 @@ def process_email_message(msg: MailMessage) -> None:
     Logs:
         - Info if the email has no subject.
         - Info if the email arrived outside market hours.
+        - Warning if no delivery succeeded, so the alert was not recorded.
 
     Workflow:
         1. Checks if the email has a subject.
         2. Checks if the email arrived during or near market hours.
         3. Extracts ticker symbols from the subject.
         4. Sends notifications to all configured platforms for each extracted ticker.
+        5. Records the alert only if at least one delivery succeeded.
     """
     if not msg.subject:
         logger.info("Email has no subject")
@@ -151,9 +153,17 @@ def process_email_message(msg: MailMessage) -> None:
 
     for ticker in tickers:
         if should_alert(ticker, timeframe, alert_date):
-            notify_all_platforms(ticker, timeframe)
-            record_alert(ticker, timeframe, alert_date)
-            logger.info("Alert sent ticker=%s timeframe=%s", ticker, timeframe)
+            delivered = notify_all_platforms(ticker, timeframe)
+            # 📝 Record only real deliveries, so a failed alert can be retried later
+            if delivered >= 1:
+                record_alert(ticker, timeframe, alert_date)
+                logger.info("Alert sent ticker=%s timeframe=%s", ticker, timeframe)
+            else:
+                logger.warning(
+                    "No delivery succeeded, alert not recorded ticker=%s timeframe=%s",
+                    ticker,
+                    timeframe,
+                )
         else:
             logger.info(
                 "Alert suppressed (duplicate) ticker=%s timeframe=%s",

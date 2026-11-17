@@ -10,13 +10,18 @@ import logging
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 import requests
 import responses
 
 from hvcwatch.config import Settings
-from hvcwatch.notification import DiscordNotifier, notify_all_platforms
+from hvcwatch.notification import (
+    DiscordDeliveryError,
+    DiscordNotifier,
+    notify_all_platforms,
+)
 from hvcwatch.utils import MASSIVE_TICKER_URL
 
 WEBHOOK_URL = (
@@ -32,18 +37,30 @@ def fake_discord(http_mock: responses.RequestsMock) -> Callable[..., None]:
     """
     🎭 Factory: `fake_discord(url)` registers a Discord webhook that accepts POSTs.
 
-    Replies 200 with a JSON body, because DiscordWebhook.execute always runs
-    json.loads on the body (an empty body raises JSONDecodeError). Never 429,
-    since the library would then call a real sleep.
+    Replies 200 with a JSON body by default. Any status works, 429 included,
+    because the `sleeps` fixture stops the retry waits from really sleeping.
     """
 
     def _register(url: str = WEBHOOK_URL, status: int = 200, **reply: Any) -> None:
-        assert status != 429, "a 429 reply makes discord_webhook sleep for real"
         if "body" not in reply:  # 🧩 responses rejects json and body together
             reply.setdefault("json", {"id": "1"})
         http_mock.post(url, status=status, **reply)
 
     return _register
+
+
+@pytest.fixture(autouse=True)
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """
+    💤 Record every retry wait instead of sleeping.
+
+    Also turns jitter off, so the waits are exact (1, 2, 4 seconds) and no
+    test really sleeps. Returns the sleep mock for assertions.
+    """
+    sleep = MagicMock()
+    monkeypatch.setattr("hvcwatch.notification.time.sleep", sleep)
+    monkeypatch.setattr("hvcwatch.notification._with_jitter", lambda delay: delay)
+    return sleep
 
 
 @pytest.fixture
@@ -185,19 +202,10 @@ class TestDiscordNotifierSend:
         (payload,) = posts_to(http_mock, WEBHOOK_URL)
         assert only_embed(payload)["image"]["url"] == "https://example.com/clear.png"
 
-    @pytest.mark.parametrize("status", [400, 500])
-    def test_send_non_2xx_with_json_body_does_not_raise(
-        self, http_mock, fake_discord, status
-    ):
-        """
-        📌 Pins today's behavior for a non-2xx reply, nothing more.
-
-        TODO(#117): the failure policy is undecided. Today send() returns
-        normally, so the caller counts the alert as sent. When #117 is decided,
-        replace this test with one that asserts the chosen policy.
-        """
+    def test_204_empty_body_is_success(self, http_mock, fake_discord):
+        """✅ Discord's 204 (no body) is a successful delivery, not an error."""
         # Arrange
-        fake_discord(status=status, json={"message": "nope"})
+        fake_discord(status=204, body="")
 
         # Act (no exception is the observable behavior)
         DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
@@ -205,14 +213,103 @@ class TestDiscordNotifierSend:
         # Assert
         assert len(posts_to(http_mock, WEBHOOK_URL)) == 1
 
-    def test_send_connection_error_propagates(self, http_mock, fake_discord):
-        """🔌 A network failure reaches the caller (notify_all_platforms handles it)."""
+
+class TestDiscordDeliveryRetries:
+    """DiscordNotifier.send: retries transient failures, raises when Discord rejects."""
+
+    def test_server_error_then_success_posts_twice(
+        self, http_mock, fake_discord, sleeps
+    ):
+        """🔁 A 500 is retried, and the second attempt succeeds."""
         # Arrange
-        fake_discord(body=requests.ConnectionError("boom"))
+        fake_discord(status=500, json={"message": "oops"})
+        fake_discord()
+
+        # Act
+        DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
+
+        # Assert
+        assert len(posts_to(http_mock, WEBHOOK_URL)) == 2
+        sleeps.assert_called_once_with(1)
+
+    @pytest.mark.parametrize(
+        "rate_limit_reply",
+        [
+            pytest.param({"json": {"retry_after": 7}}, id="retry-after-in-body"),
+            pytest.param(
+                {"json": {}, "headers": {"Retry-After": "7"}},
+                id="retry-after-header",
+            ),
+        ],
+    )
+    def test_429_waits_retry_after_when_larger_than_backoff(
+        self, http_mock, fake_discord, sleeps, rate_limit_reply
+    ):
+        """⏳ A 429 waits the Discord-requested 7 seconds (more than the 1s backoff)."""
+        # Arrange
+        fake_discord(status=429, **rate_limit_reply)
+        fake_discord()
+
+        # Act
+        DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
+
+        # Assert
+        assert len(posts_to(http_mock, WEBHOOK_URL)) == 2
+        sleeps.assert_called_once_with(7)
+
+    def test_client_error_fails_without_retry(self, http_mock, fake_discord, sleeps):
+        """🚫 A 400 is a bad request: one POST, no wait, and send raises."""
+        # Arrange
+        fake_discord(status=400, json={"message": "bad"})
 
         # Act / Assert
-        with pytest.raises(requests.ConnectionError):
+        with pytest.raises(DiscordDeliveryError):
             DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
+        assert len(posts_to(http_mock, WEBHOOK_URL)) == 1
+        sleeps.assert_not_called()
+
+    def test_gives_up_after_four_attempts(self, http_mock, fake_discord):
+        """🛑 Four failed attempts in a row make send raise DiscordDeliveryError."""
+        # Arrange
+        fake_discord(status=503, json={"message": "down"})
+
+        # Act / Assert
+        with pytest.raises(DiscordDeliveryError):
+            DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
+        assert len(posts_to(http_mock, WEBHOOK_URL)) == 4
+
+    def test_backoff_waits_one_two_four_seconds(self, http_mock, fake_discord, sleeps):
+        """📈 Exponential backoff: 3 waits of 1, 2, and 4 seconds across 4 attempts."""
+        # Arrange
+        fake_discord(status=500, json={"message": "oops"})
+
+        # Act
+        with pytest.raises(DiscordDeliveryError):
+            DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
+
+        # Assert
+        assert [call.args[0] for call in sleeps.call_args_list] == [1, 2, 4]
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            pytest.param(requests.ConnectionError("boom"), id="connection-error"),
+            pytest.param(requests.Timeout("slow"), id="timeout"),
+        ],
+    )
+    def test_network_error_then_success_posts_twice(
+        self, http_mock, fake_discord, error
+    ):
+        """🔌 A dropped connection or timeout is retried, and the next attempt succeeds."""
+        # Arrange
+        fake_discord(body=error)
+        fake_discord()
+
+        # Act
+        DiscordNotifier(webhook_url=WEBHOOK_URL).send("AAPL", "daily")
+
+        # Assert
+        assert len(posts_to(http_mock, WEBHOOK_URL)) == 2
 
 
 class TestNotifyAllPlatforms:
@@ -287,28 +384,37 @@ class TestNotifyAllPlatforms:
         assert "Failed to send notification" in errors[0].getMessage()
         assert "boom" in errors[0].getMessage()
 
-    def test_empty_json_body_is_logged_as_failure(self, fake_discord, caplog):
-        """
-        🕳️ An empty 200 body makes execute raise JSONDecodeError, which is logged.
-
-        Guards the fake itself: a 200 with no JSON body would look like success
-        in a "one POST" check while the real send had failed.
-        """
+    @pytest.mark.parametrize(
+        ("failing_urls", "expected_sent"),
+        [
+            pytest.param({WEBHOOK_URL}, 1, id="one-of-two-fails"),
+            pytest.param({WEBHOOK_URL, SECOND_URL}, 0, id="all-fail"),
+        ],
+    )
+    def test_returns_number_of_successful_sends(
+        self, fake_discord, override_settings, caplog, failing_urls, expected_sent
+    ):
+        """🔢 The return value counts the URLs that accepted the alert, and warns if 0."""
         # Arrange
-        fake_discord(body="")
+        override_settings(discord_webhook_urls=f"{SECOND_URL}, {WEBHOOK_URL}")
+        for url in (WEBHOOK_URL, SECOND_URL):
+            fake_discord(url, status=500 if url in failing_urls else 200)
 
         # Act
-        with caplog.at_level(logging.ERROR, logger="hvcwatch.notification"):
-            notify_all_platforms("AAPL", "daily")
+        with caplog.at_level(logging.WARNING, logger="hvcwatch.notification"):
+            sent = notify_all_platforms("AAPL", "daily")
 
         # Assert
-        assert "Failed to send notification" in caplog.text
+        assert sent == expected_sent
+        assert ("No Discord notification delivered" in caplog.text) is (
+            expected_sent == 0
+        )
 
-    def test_no_urls_makes_no_http_calls_and_warns(
+    def test_no_urls_makes_no_http_calls_warns_and_returns_zero(
         self, http_mock, monkeypatch, caplog
     ):
         """
-        📭 With no webhook URLs, nothing is sent and a warning says so.
+        📭 With no webhook URLs, nothing is sent, a warning says so, and 0 returns.
 
         Settings validation rejects a config with no URL, so the empty list is
         injected directly instead of building a Settings that has none.
@@ -318,8 +424,10 @@ class TestNotifyAllPlatforms:
 
         # Act
         with caplog.at_level(logging.WARNING, logger="hvcwatch.notification"):
-            notify_all_platforms("AAPL", "daily")
+            sent = notify_all_platforms("AAPL", "daily")
 
         # Assert
+        assert sent == 0
         assert len(http_mock.calls) == 0
-        assert "No notifications sent" in caplog.text
+        assert "No Discord webhooks configured, nothing sent" in caplog.text
+        assert "No Discord notification delivered" not in caplog.text
