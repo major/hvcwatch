@@ -1,6 +1,6 @@
 # 🏗️ Stage 1: build the virtual environment with uv
 FROM docker.io/library/python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS builder
-COPY --from=ghcr.io/astral-sh/uv:latest@sha256:db9370c2b0b837c74f454bea914343da9f29232035aa7632a1b14dc03add9edb /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:latest@sha256:d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d /uv /uvx /bin/
 
 # ⚙️ Compile bytecode, copy files instead of linking, and never download a Python
 # The venv links to the base image's Python, so the runtime stage must use the same image
