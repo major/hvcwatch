@@ -11,7 +11,6 @@ from datetime import date
 import pytest
 
 from hvcwatch.db import (
-    _get_week_monday,
     get_cursor,
     record_alert,
     save_cursor,
@@ -19,6 +18,7 @@ from hvcwatch.db import (
 )
 
 MONDAY = date(2024, 12, 2)
+TUESDAY = date(2024, 12, 3)
 
 
 def count_rows(db_path) -> int:
@@ -30,109 +30,33 @@ def count_rows(db_path) -> int:
             return 0
 
 
-class TestGetWeekMonday:
-    """Test cases for _get_week_monday helper."""
-
-    @pytest.mark.parametrize(
-        "input_date,expected_monday",
-        [
-            (date(2024, 12, 2), date(2024, 12, 2)),  # Monday -> Monday
-            (date(2024, 12, 3), date(2024, 12, 2)),  # Tuesday -> Monday
-            (date(2024, 12, 4), date(2024, 12, 2)),  # Wednesday -> Monday
-            (date(2024, 12, 5), date(2024, 12, 2)),  # Thursday -> Monday
-            (date(2024, 12, 6), date(2024, 12, 2)),  # Friday -> Monday
-            (date(2024, 12, 7), date(2024, 12, 2)),  # Saturday -> Monday
-            (date(2024, 12, 8), date(2024, 12, 2)),  # Sunday -> Monday
-            (date(2024, 12, 9), date(2024, 12, 9)),  # Next Monday -> Next Monday
-        ],
-    )
-    def test_get_week_monday(self, input_date, expected_monday):
-        """Test Monday calculation for various days of the week."""
-        assert _get_week_monday(input_date) == expected_monday
-
-
-class TestDaily:
-    """Daily alerts are never deduplicated and never stored."""
-
-    def test_daily_always_alerts(self):
-        """📅 should_alert is True for daily even when a record call came first."""
-        record_alert("AAPL", "daily", MONDAY)
-
-        assert should_alert("AAPL", "daily", MONDAY) is True
-
-    def test_record_alert_daily_stores_nothing(self, db_path):
-        """📅 record_alert on a daily alert writes no row."""
-        record_alert("AAPL", "daily", MONDAY)
-
-        assert count_rows(db_path) == 0
-
-
 class TestDeduplication:
-    """Weekly (Monday-based) and monthly suppression rules."""
+    """One alert per ticker, per timeframe, per calendar day."""
 
     @pytest.mark.parametrize(
         ("timeframe", "first", "second", "expected"),
         [
+            pytest.param("daily", MONDAY, MONDAY, False, id="daily-same-day"),
+            pytest.param("weekly", MONDAY, MONDAY, False, id="weekly-same-day"),
+            pytest.param("monthly", MONDAY, MONDAY, False, id="monthly-same-day"),
+            pytest.param("daily", MONDAY, TUESDAY, True, id="daily-next-day"),
             pytest.param(
-                "weekly",
-                date(2024, 12, 2),
-                date(2024, 12, 3),
-                False,
-                id="weekly-same-week",
+                "weekly", MONDAY, TUESDAY, True, id="weekly-monday-then-tuesday"
             ),
             pytest.param(
-                "weekly",
-                date(2024, 12, 2),
-                date(2024, 12, 8),
-                False,
-                id="weekly-monday-to-sunday",
+                "monthly", MONDAY, TUESDAY, True, id="monthly-two-days-same-month"
             ),
             pytest.param(
-                "weekly",
-                date(2024, 12, 8),
-                date(2024, 12, 9),
+                "daily",
+                TUESDAY,
+                MONDAY,
                 True,
-                id="weekly-sunday-to-monday",
-            ),
-            pytest.param(
-                "weekly",
-                date(2024, 12, 2),
-                date(2024, 12, 9),
-                True,
-                id="weekly-next-week",
-            ),
-            pytest.param(
-                "monthly",
-                date(2024, 12, 1),
-                date(2024, 12, 15),
-                False,
-                id="monthly-same-month",
-            ),
-            pytest.param(
-                "monthly",
-                date(2024, 12, 15),
-                date(2025, 1, 5),
-                True,
-                id="monthly-next-month",
-            ),
-            pytest.param(
-                "monthly",
-                date(2024, 12, 31),
-                date(2025, 1, 1),
-                True,
-                id="monthly-year-change",
-            ),
-            pytest.param(
-                "monthly",
-                date(2024, 12, 15),
-                date(2025, 12, 15),
-                True,
-                id="monthly-same-month-next-year",
+                id="daily-earlier-day-after-later-record",
             ),
         ],
     )
     def test_second_alert_decision(self, timeframe, first, second, expected):
-        """🔁 The first alert passes, then the second follows the timeframe rule."""
+        """🔁 The first alert passes. The second passes only on a different calendar day."""
         assert should_alert("AAPL", timeframe, first) is True
         record_alert("AAPL", timeframe, first)
 
@@ -146,43 +70,16 @@ class TestDeduplication:
         assert should_alert("AAPL", "weekly", MONDAY) is False
 
     def test_timeframes_are_independent(self):
-        """🧍 A weekly record does not suppress monthly, and the reverse."""
+        """🧍 A record in one timeframe does not suppress another timeframe on the same day."""
+        record_alert("AAPL", "daily", MONDAY)
+
+        assert should_alert("AAPL", "weekly", MONDAY) is True
+        assert should_alert("AAPL", "monthly", MONDAY) is True
+
         record_alert("AAPL", "weekly", MONDAY)
 
         assert should_alert("AAPL", "monthly", MONDAY) is True
-
-        record_alert("AAPL", "monthly", MONDAY)
-
-        assert should_alert("AAPL", "weekly", MONDAY) is False
-        assert should_alert("AAPL", "monthly", MONDAY) is False
-
-    @pytest.mark.parametrize(
-        ("timeframe", "newer", "older", "check"),
-        [
-            pytest.param(
-                "weekly",
-                date(2024, 12, 9),
-                date(2024, 12, 2),
-                date(2024, 12, 10),
-                id="weekly",
-            ),
-            pytest.param(
-                "monthly",
-                date(2025, 1, 5),
-                date(2024, 12, 2),
-                date(2025, 1, 20),
-                id="monthly",
-            ),
-        ],
-    )
-    def test_latest_alert_wins_when_recorded_out_of_order(
-        self, timeframe, newer, older, check
-    ):
-        """⏪ The newest stored date decides, whatever order the rows were recorded."""
-        record_alert("AAPL", timeframe, newer)
-        record_alert("AAPL", timeframe, older)
-
-        assert should_alert("AAPL", timeframe, check) is False
+        assert should_alert("AAPL", "daily", MONDAY) is False
 
 
 class TestTickerCase:
@@ -201,6 +98,12 @@ class TestTickerCase:
 
 class TestRecordAlert:
     """Test cases for record_alert storage."""
+
+    def test_record_alert_daily_stores_row(self, db_path):
+        """📅 record_alert on a daily alert writes one row."""
+        record_alert("AAPL", "daily", MONDAY)
+
+        assert count_rows(db_path) == 1
 
     def test_recording_the_same_key_twice_keeps_one_row(self, db_path):
         """♻️ Re-recording the same ticker, timeframe, and date does not fail or duplicate."""
@@ -250,7 +153,7 @@ class TestDatabasePath:
         record_alert("TEST", "weekly", MONDAY)
 
         assert nested.exists()
-        assert should_alert("TEST", "weekly", date(2024, 12, 3)) is False
+        assert should_alert("TEST", "weekly", MONDAY) is False
 
     @pytest.mark.parametrize("configured", [None, ""], ids=["unset", "empty"])
     def test_uses_default_path_when_not_configured(
