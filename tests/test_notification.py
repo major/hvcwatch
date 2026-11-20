@@ -7,7 +7,7 @@ user would see.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import httpx2
 import pytest
@@ -23,8 +23,6 @@ from hvcwatch.notification import (
     notify_all_platforms,
 )
 from tests.helpers import SECOND_URL, WEBHOOK_URL, daily_bar, only_embed, posts_to
-
-FOOTER = "HVC Watch · Major's Bots"
 
 
 class TestDiscordNotifierSend:
@@ -109,18 +107,19 @@ class TestDiscordNotifierSend:
             "title": embed["title"],
             "description": embed["description"],
             "color": embed["color"],
-            "footer": embed["footer"]["text"],
             "image": embed["image"]["url"],
             "thumbnail": embed["thumbnail"]["url"],
         } == {
             "title": title,
             "description": description,
             "color": color,
-            "footer": FOOTER,
             "image": settings.transparent_png,
             "thumbnail": f"https://static.stocktitan.net/company-logo/{ticker.lower()}.webp",
         }
-        assert datetime.fromisoformat(embed["timestamp"])
+        # 🧹 No footer row. Discord shows the send time, so no timestamp either.
+        # The library stores an unset footer as None and drops an unset timestamp key.
+        assert embed.get("footer") is None
+        assert embed.get("timestamp") is None
 
     def test_send_uses_custom_transparent_png(
         self, http_mock, fake_discord, override_settings
