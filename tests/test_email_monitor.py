@@ -33,8 +33,6 @@ MONDAY = "Mon, 02 Dec 2024 14:30:00 -0500"
 FRIDAY = "Fri, 15 Nov 2024 14:30:00 -0500"
 WEDNESDAY = "Wed, 20 Nov 2024 14:30:00 -0500"
 SATURDAY = "Sat, 07 Dec 2024 14:30:00 -0500"  # 🌙 Market closed
-# 📆 Same month as MONDAY, a year on
-MONDAY_NEXT_YEAR = "Mon, 01 Dec 2025 14:30:00 -0500"
 
 # 📧 Subjects in the format the real alert emails use
 DAILY_SUBJECT = "Alert: New symbols: AAPL were added to HVC"
@@ -356,7 +354,7 @@ class TestProcessEmailMessage:
     def test_mixed_dedup_alerts_only_new_tickers(
         self, http_mock, fake_discord, db_path
     ):
-        """🧩 AAPL was already sent this week, so only MSFT and NVDA alert."""
+        """🧩 AAPL was already sent on this day, so only MSFT and NVDA alert."""
         # Arrange
         fake_discord()
         record_alert("AAPL", "weekly", date(2024, 12, 2))
@@ -372,24 +370,25 @@ class TestProcessEmailMessage:
             ("NVDA", "weekly", "2024-12-02"),
         ]
 
-    def test_daily_always_alerts(self, http_mock, fake_discord, db_path):
-        """☀️ Daily alerts are never deduplicated and never recorded."""
+    def test_daily_same_day_alerts_once(self, http_mock, fake_discord, db_path, caplog):
+        """☀️ Two daily emails for one ticker on one day send one alert, record one row, and log the second as suppressed."""
         # Arrange
         fake_discord()
-        msg = make_email(DAILY_SUBJECT)
 
         # Act
-        process_email_message(msg)
-        process_email_message(msg)
+        with caplog.at_level(logging.INFO, logger="hvcwatch.email_monitor"):
+            process_email_message(make_email(DAILY_SUBJECT, uid=11))
+            process_email_message(make_email(DAILY_SUBJECT, uid=12))
 
         # Assert
-        assert posted_titles(http_mock) == ["AAPL", "AAPL"]
-        assert read_alert_rows(db_path) == []
+        assert posted_titles(http_mock) == ["AAPL"]
+        assert read_alert_rows(db_path) == [("AAPL", "daily", "2024-12-02")]
+        assert "Alert suppressed (duplicate) ticker=AAPL timeframe=daily" in caplog.text
 
-    def test_monthly_alert_uses_email_date_and_dedups_within_month(
+    def test_monthly_alert_uses_email_date_and_dedups_within_day(
         self, http_mock, fake_discord, db_path
     ):
-        """📅 The email's Date header picks the stored month, not today's date."""
+        """📅 The email's Date header picks the stored day, and a second email that day is suppressed."""
         # Arrange
         fake_discord()
 
@@ -399,28 +398,21 @@ class TestProcessEmailMessage:
         # Assert
         assert read_alert_rows(db_path) == [("AAPL", "monthly", "2024-11-15")]
 
-        # Act: a later email in the same month is suppressed
-        process_email_message(make_email(MONTHLY_SUBJECT, WEDNESDAY))
+        # Act: another email the same day is suppressed
+        process_email_message(make_email(MONTHLY_SUBJECT, FRIDAY, uid=2))
 
         # Assert
         assert posted_titles(http_mock) == ["AAPL"]
 
-        # Act: an email in a new month alerts again
-        process_email_message(make_email(MONTHLY_SUBJECT, MONDAY))
+        # Act: an email on another day of the same month alerts again
+        process_email_message(make_email(MONTHLY_SUBJECT, WEDNESDAY))
 
         # Assert
         assert posted_titles(http_mock) == ["AAPL", "AAPL"]
         assert read_alert_rows(db_path) == [
             ("AAPL", "monthly", "2024-11-15"),
-            ("AAPL", "monthly", "2024-12-02"),
+            ("AAPL", "monthly", "2024-11-20"),
         ]
-
-        # Act: the same month number a year later is a new month
-        process_email_message(make_email(MONTHLY_SUBJECT, MONDAY_NEXT_YEAR))
-
-        # Assert
-        assert posted_titles(http_mock) == ["AAPL", "AAPL", "AAPL"]
-        assert read_alert_rows(db_path)[-1] == ("AAPL", "monthly", "2025-12-01")
 
     @pytest.mark.parametrize(
         ("timeframe", "subject"),
