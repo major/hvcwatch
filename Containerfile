@@ -1,6 +1,6 @@
 # 🏗️ Stage 1: build the virtual environment with uv
-FROM docker.io/library/python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS builder
-COPY --from=ghcr.io/astral-sh/uv:latest@sha256:d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d /uv /uvx /bin/
+FROM docker.io/library/python:3.15-slim@sha256:08a4c22c92b79ec821a7ad49768480039ee5b7accac3955228e75366e30abc8e AS builder
+COPY --from=ghcr.io/astral-sh/uv:latest@sha256:a3ea1357342c1a4bf9a0c53a3deb1b55379aefa037338d8113d5771efa01774f /uv /uvx /bin/
 
 # ⚙️ Compile bytecode, copy files instead of linking, and never download a Python
 # The venv links to the base image's Python, so the runtime stage must use the same image
@@ -20,7 +20,7 @@ COPY src ./src
 RUN uv sync --locked --no-dev --no-editable
 
 # 🚀 Stage 2: runtime image with no uv and no build tools
-FROM docker.io/library/python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
+FROM docker.io/library/python:3.15-slim@sha256:08a4c22c92b79ec821a7ad49768480039ee5b7accac3955228e75366e30abc8e
 
 # 🏷️ Capture git commit info at build time (final stage only, so it does not bust the cache)
 ARG GIT_COMMIT=unknown
